@@ -1,0 +1,364 @@
+---
+title: "TB Manuscript Figures"
+author: "Daniel Gatti"
+date: "May 20, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+base_dir = "/media/dmgatti/hdb/projects/TB/"
+
+library(readxl)
+library(tidyverse)
+library(survival)
+library(GGally)
+library(ggbeeswarm)
+library(survminer)
+library(pcaMethods)
+library(emmeans)
+library(corrplot)
+```
+
+Load in the phenotype data.
+
+```{r}
+# Reascale_color_manual(values = cols) +d in the data and change column names.
+pheno = read_xlsx(str_c(base_dir, "data/phenotypes/JDO lung phenotypes 081117.xlsx")) %>%
+          rename(mouse = `Mouse #`,
+                 coat = `Coat color`,
+                 gen = `J:DO DOB or generation`,
+                 expt = `Gillian's expt name`,
+                 to_geneseek = `Sent to GeneSeek`,
+                 cage = `Cage Number`,
+                 batch = `Aerosol run No`,
+                 dose  = `Mtb initial dose`,
+                 susceptibility = `Susceptibility Class`,
+                 survival = `Survival`,
+                 euth = `Euthanized due to morbidity`,
+                 wt_loss = `% wt loss`,
+                 lung_mtb = `Lung Mtb burden`,
+                 cxcl5 = `Lung CXCL5 pg/ml`,
+                 cxcl2 = `Lung CXCL2 pg/ml`,
+                 cxcl1 = `Lung CXCL1 pg/ml`,
+                 pct_normal = `% Normal lung`,
+                 ifng = `Lung IFNg pg/ml`,
+                 tnfa = `Lung TNF pg/ml`,
+                 il12 = `Lung IL-12 pg/ml`,
+                 il10 = `Lung IL-10 pg/ml`,
+                 mmp8 = `Lung MMP8 (pg/ml)`,
+                 vegf = `Lung VEGF (pg/ml)`,
+                 s100a8 = `Lung S100A8 (pg/ml)`) %>%
+           mutate(lung_mtb = as.numeric(lung_mtb),
+                  cxcl1 = as.numeric(cxcl1),
+                  cxcl2 = as.numeric(cxcl2),
+                  cxcl5 = as.numeric(cxcl5),
+                  pct_normal = as.numeric(pct_normal),
+                  ifng = as.numeric(ifng),
+                  tnfa = as.numeric(tnfa),
+                  il12 = as.numeric(il12),
+                  il10 = as.numeric(il10),
+                  mmp8 = as.numeric(mmp8),
+                  vegf = as.numeric(vegf),
+                  s100a8 = as.numeric(s100a8),
+                  euth = recode(euth, `Y` = 1, `N` = 0))
+  
+# Add a strain column.
+pheno = pheno %>%
+          mutate(strain = if_else(grepl("C57BL/6J", coat), "BL6", "DO"))
+
+# Add a column for DO dosed/not-dosed or BL6.
+pheno = pheno %>%
+          mutate(type = strain,
+                 type = if_else(dose == 0, "DO_ctrl", "DO_infect"),
+                 type = if_else(strain == "BL6", "BL6_infect", type))
+
+# Color palette. cut off the first one because it's too light.
+cols = RColorBrewer::brewer.pal(n = 6, name = "OrRd")[-1]
+```
+
+## Figure: Phenotypes
+
+```{r fig1,fig.width=12,fig.height=8}
+# Unnormalized phenotypes
+tmp = pheno %>%
+        select(type, expt, dose, wt_loss:s100a8) %>%
+        gather(phenotype, value, -type, -expt, -dose, convert = TRUE) %>%
+        mutate(value = as.numeric(value) + 1,
+               dose = factor(dose)) %>%
+        na.omit()
+
+# With batch in the data.
+ggplot(tmp, aes(type, value)) +
+  geom_beeswarm(aes(color = expt), alpha = 0.3) +
+  geom_violin(fill = NA) +
+  scale_y_log10() +
+  facet_wrap(~phenotype, scale = "free")
+```
+Untransformed phenotypes by experimental batch. Each panel shows the untransformed phenotypes, with mouse groups on the x-axis and phenotype value on the y-axis (log). Each point is a a value from a single mouse. The curves around the points are sample densities. There is an effect of batch among the BL6 and uninfected DO mice. We can't be certain of the magnitude of the batch effects in the DO infected mice because batch and TB dose are confounded.
+
+
+```{r fig1_by_dose_bee_violin,fig.width=16,fig.height=8}
+tmp = pheno %>%
+        select(type, expt, dose, starts_with("cxcl"), lung_mtb, pct_normal, wt_loss) %>% 
+        mutate(pct_normal = 100.0 - pct_normal) %>% 
+        rename(Cxcl1 = cxcl1, 
+               Cxcl2 = cxcl2, 
+               Cxcl5 = cxcl5, 
+               `Lung M.Tb. Burden` = lung_mtb, 
+               `% Damaged Lung` = pct_normal, 
+               `% Weight Loss` = wt_loss) %>%
+        gather(phenotype, value, -(type:dose)) %>%
+        na.omit()
+
+# Unnormalized phenotypes
+p = tmp %>%
+  ggplot(aes(type, value)) +
+    geom_beeswarm(aes(color = dose), alpha = 0.5) +
+    geom_violin(fill = NA) +
+    scale_y_log10() +
+    scale_color_continuous(type = "viridis") +
+    facet_wrap(~phenotype, scale = "free") +
+    theme_bw() +
+    theme(text = element_text(size = 24))
+
+png(file = str_c(base_dir, "docs/manuscript1/figures/fig1.png"), width = 4000, height = 3000, res = 300)
+print(p)
+dev.off()
+
+print(p)
+```
+Subset of untransformed phenotypes colored by dose. Each panel shows the untransformed phenotypes, with mouse groups on the x-axis and phenotype value on the y-axis (log). Each point is a a value from a single mouse. The curves around the points are sample densities. 
+
+Another way of viewing these.
+
+```{r fig1_by_dose_violin,fig.width=16,fig.height=8}
+# Unnormalized phenotypes
+p = tmp %>%
+  unite(type_dose, type, dose, remove = FALSE) %>%
+  mutate(type_dose = factor(type_dose, levels = c("BL6_infect_28", "BL6_infect_97", "DO_ctrl_0", "DO_infect_16", "DO_infect_28", "DO_infect_97", "DO_infect_127"))) %>%
+  ggplot(aes(type_dose, value)) +
+    geom_beeswarm(alpha = 0.5) +
+    geom_violin(fill = NA) +
+    scale_y_log10() +
+    facet_wrap(~phenotype, scale = "free") +
+    theme_bw() +
+    theme(text = element_text(size = 24))
+
+print(p)
+```
+
+Boxplots.
+
+```{r fig1_by_dose_boxplot,fig.width=16,fig.height=8}
+# Unnormalized phenotypes
+p = tmp %>%
+  unite(type_dose, type, dose, remove = FALSE) %>%
+  mutate(type_dose = factor(type_dose, levels = c("BL6_infect_28", "BL6_infect_97", "DO_ctrl_0", "DO_infect_16", "DO_infect_28", "DO_infect_97", "DO_infect_127"))) %>%
+  ggplot(aes(type_dose, value)) +
+    geom_boxplot(fill = NA) +
+    scale_y_log10() +
+    facet_wrap(~phenotype, scale = "free_y ") +
+    theme_bw() +
+    theme(axis.text = element_text(size = 16),  strip.text = element_text(size = 20))
+
+svg(file = str_c(base_dir, "docs/manuscript1/figures/fig1.svg"), width = 10, height = 6.5)
+print(p)
+dev.off()
+
+print(p)
+```
+
+There are also batches within each experiment/dose group.
+
+```{r batch_corr,fig.width=12,fig.height=8}
+pheno %>%
+  select(type, expt, dose, batch, ifng) %>%
+  filter(!is.na(type), !is.na(expt), !is.na(dose), !is.na(batch)) %>%
+  mutate(dose = factor(dose, levels = c(0, 16, 28, 97, 127))) %>% 
+  unite(bd, dose, batch, remove = FALSE) %>%
+  ggplot() +
+    geom_violin(aes(bd, ifng, fill = dose), draw_quantiles = 0.5, color = 'black') +
+    scale_y_log10() +
+    facet_wrap(~type) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+    labs(x = "Dose/Batch")
+```
+Batch versus Ifn-gamma. Dose and batch are plotted on the x-axis and Ifn-gamma on the y-axis. Each panel is one set of mice. Mice that received lower doses seem to have lower Ifn-gamma values. 
+
+Regress out batch (run group, not dose!).
+
+```{r batch_adjust}
+log_data = pheno %>%
+             select(type, expt, batch, dose, wt_loss:s100a8) %>%
+             mutate(dose  = factor(dose),
+                    batch = factor(batch)) %>%
+             unite(bd, dose, batch, remove = FALSE) %>%
+             mutate_if(is.numeric, log1p) %>%
+             as.data.frame()
+
+# Column 6 is where the phenotype data start.
+for(i in 6:ncol(log_data)) {
+  
+  mod = lm(log_data[[i]] ~ dose + bd, data = log_data, na.action = na.exclude)
+  em_bd   = emmeans(mod, "bd")
+  em_dose = emmeans(mod, "dose")
+  bd = pull(log_data, bd)
+  bd_emm   = summary(em_bd)$emmean[match(bd, summary(em_bd)$bd)]
+  dose = pull(log_data, dose)
+  dose_emm = summary(em_dose)$emmean[match(dose, summary(em_dose)$dose)]
+  bd_emm[is.na(bd_emm)]     = 0   # Needed to set NA values to 0 so that we don't change them.
+  dose_emm[is.na(dose_emm)] = 0   # Needed to set NA values to 0 so that we don't change them.
+  log_data[[i]] = log_data[[i]] - bd_emm + dose_emm
+
+} # for(i)
+
+log_data = log_data %>%
+             select(-bd)
+write_csv(data.frame(mouse = pheno$mouse, log_data), path = str_c(base_dir, "data/phenotypes/tb_pheno_log_batch_correct.csv"))
+```
+
+Plot the mouse groups colored by dose.
+
+```{r fig.width=12,fig.height=8}
+tmp = log_data %>%
+        mutate(dose = factor(dose, levels = sort(unique(dose)))) %>%
+        gather(phenotype, value, -(type:dose), convert = TRUE) %>%
+        filter(!is.na(value))
+
+ggplot(tmp, aes(type, value)) +
+  geom_beeswarm(aes(color = dose), alpha = 0.5) +
+  geom_violin(fill = NA) +
+  scale_color_manual(values = cols) +
+  facet_wrap(~phenotype, scale = "free")
+```
+
+Plot the phenotypes by run batch, colored by dose to see if the batch normalization worked.
+
+```{r dose_expt_after_batch_cor,fig.width=12,fig.height=8}
+log_data %>%
+  select(type, expt, dose, batch, ifng) %>%
+  filter(!is.na(type), !is.na(expt), !is.na(dose), !is.na(batch)) %>%
+  mutate(dose = factor(dose, levels = c(0, 16, 28, 97, 127)),
+         ifng = expm1(ifng)) %>% 
+  unite(bd, dose, batch, remove = FALSE) %>%
+  ggplot() +
+    geom_violin(aes(bd, ifng, fill = dose), draw_quantiles = 0.5, color = 'black') +
+    facet_wrap(~type) +
+    scale_y_log10() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+    labs(x = "Dose/Batch")
+```
+In the figure above, I'm looking to see whether the Ifn-gamma means of the run batches are closer together.
+
+Next, we look to see what values are correlated in the TB-infected DO mice.
+
+```{r pheno_correlation,fig.width=12}
+log_data = pheno %>%
+             filter(type == "DO_infect") %>%
+             select(dose, wt_loss:s100a8) %>%
+             mutate(dose = factor(dose)) %>%
+             mutate_if(is.numeric, log1p) %>%
+             as.data.frame()
+
+for(i in 2:ncol(log_data)) {
+  
+  mod = lm(log_data[[i]] ~ dose, data = log_data, na.action = na.exclude)
+  log_data[[i]] = residuals(mod) 
+
+} # for(i)
+
+pheno_cor = cor(as.matrix(log_data[,-1]), use = "pairwise")
+corrplot.mixed(pheno_cor, upper = "ellipse", order = "hclust")
+
+```
+Each ellipse represents a pairwise correlation between two phenotypes. The skinnier the ellipse, the stronger the magnitude of the correlation. Positive correlations are blue and negative correlations are red. The numbers in the lower triangle are the Pearson correlations. The phenotypes are also clustered by the magnitude of their pairwise correlation. Ifng and Il12 are modestly positively correlated. There is a large block of phenotypes that are correlated with lung Mtb burden. Ifng is modestly correlated with these values as well. Percent normal lung is modestly negatively correlated with this block.
+
+Next, we plot each pair of phenotypes against each other. This helps us to see whether the correlations are driven by outliers.
+
+```{r pairs,fig.width=12,fig.height=12,message=FALSE,warning=FALSE}
+ggpairs(log_data, columns = 2:ncol(log_data), aes(color = dose), alpha = 0.5)
+```
+
+The upper triangle shows the Pearson correlation between each pair of phenotypes. The black value is the overall corrrelation and the colored values are the correlation within each batch. The diagonal shows the distribution of each phenotype, colored by batch. The lower triangle shows a scatter plot of each pair of phenotypes. There are outliers in many of the phenotypes.  Il10 has a set of low values. Overall, the correlations don't seem to be driven by a few outliers.
+
+```{r}
+pheno %>% filter(type == "DO_infect") %>% select(mouse, il10) %>% top_n(10, -il10) %>% arrange(il10)
+```
+
+Create survival curves for BL6, DO control and DO infected (by dose?).
+
+```{r survival_model}
+fit = survfit(Surv(survival, euth) ~ type + dose, data = pheno)
+```
+
+
+```{r surrvival_plot}
+ggsurvplot(fit, data = pheno)
+```
+
+## Figure 3: QTL Heapmap
+
+```{r load_qtl_data}
+library(tidyverse)
+library(qtl2)
+library(qtl2convert)
+base_dir = "/media/dmgatti/hdb/projects/TB/"
+load(file = str_c(base_dir, "data/phenotypes/GB_Tufts_qtl2_input.Rdata"))
+source(str_c(base_dir, "scripts/qtl_heatmap.R"))
+
+rdata_files = dir(result_dir, pattern = 'Rdata$')
+qtl = NULL
+
+for(f in rdata_files) {
+  tmp = load(str_c(result_dir, f))
+  if(is.null(qtl)) {
+    qtl = lod
+  } else {
+    qtl = cbind(qtl, lod)
+  }
+} # for(f)
+
+# Cluster QTL.
+cl = hclust(as.dist(1.0 - cor(qtl)), method = "average")
+qtl = qtl[,cl$order]
+qtl = cbind(markers[,1:3], qtl)
+```
+
+```{r qtl_heatmap,fig.width=12,fig.height=8}
+qtl_heatmap(qtl)
+```
+
+```{r all_qtl,fig.width=12,fig.height=12}
+qtl %>%
+  mutate(chr = factor(chr, levels = c(1:19, 'X'))) %>%
+  gather(pheno, lod, -(marker:pos)) %>%
+  mutate(pheno = factor(pheno, levels = cl$labels[cl$order])) %>%
+  ggplot(aes(pos, lod)) +
+    geom_line() +
+    geom_abline(slope = 0, intercept = 7.3, color = 'red') +
+    geom_abline(slope = 0, intercept = 6.0, color = 'orange') +
+    facet_grid(pheno~chr, scales = 'free_x') +
+    theme(panel.spacing.x = unit(0, 'lines'),
+          panel.spacing.y = unit(0.1, 'lines'),
+          axis.text.x = element_text(angle = 90, vjust = 0))
+```
+
+```{r select_qtl,fig.width=12,fig.height=12}
+qtl %>%
+  select(marker:pos, starts_with("cxcl"), tnf, s100a8, mtb_burden, mmp8) %>%
+  mutate(chr = factor(chr, levels = c(1:19, 'X'))) %>%
+  gather(pheno, lod, -(marker:pos)) %>%
+  mutate(pheno = factor(pheno, levels = cl$labels[cl$order])) %>%
+  ggplot(aes(pos, lod)) +
+    geom_line() +
+    geom_abline(slope = 0, intercept = 7.3, color = 'red') +
+    geom_abline(slope = 0, intercept = 6.0, color = 'orange') +
+    facet_grid(pheno~chr, scales = 'free_x') +
+    theme(panel.spacing.x = unit(0, 'lines'),
+          panel.spacing.y = unit(0.1, 'lines'),
+          axis.text.x = element_text(angle = 90, vjust = 0),
+          strip.text.x = element_text(size = 24),
+          strip.text.y = element_text(size = 14, angle = 0))
+```
+

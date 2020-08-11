@@ -1,0 +1,232 @@
+---
+title: "Tufts TB Gene Expression"
+author: "Daniel Gatti"
+date: "December 18, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(pcaMethods)
+library(readxl)
+library(tidyverse)
+base_dir = '/home/dmgatti/Documents/data/TB/'
+expr_dir = str_c(base_dir, 'data/expression/reports/')
+```
+
+## Introdution
+
+Data for 72 samples was received from the gene expression core in two batches of 40 and 32 samples each. The data had been log transformed and each sample has one measurement per gene.
+
+## Data Wrangling
+
+Read in phenotype data.
+
+```{r}
+pheno = read_xlsx(str_c(base_dir, 'data/phenotypes/JDO lung phenotypes 081117.xlsx'),
+                  na = 'NA')
+pheno = pheno %>%
+          rename(sample = `Mouse #`,
+                 coat   = `Coat color`,
+                 gen    = `J:DO DOB or generation`,
+                 expt   = `Gillian's expt name`,
+                 geneseek = `Sent to GeneSeek`,
+                 cage   = `Cage Number`,
+                 run    = `Aerosol run No`,
+                 dose   = `Mtb initial dose`,
+                 class  = `Susceptibility Class`,
+                 survival = Survival,
+                 euth   = `Euthanized due to morbidity`,
+                 wt_loss = `% wt loss`,
+                 mtb_burden = `Lung Mtb burden`,
+                 cxcl5  = `Lung CXCL5 pg/ml`,
+                 cxcl2  = `Lung CXCL2 pg/ml`,
+                 cxcl1  = `Lung CXCL1 pg/ml`,
+                 pct_normal = `% Normal lung`,
+                 ifng   = `Lung IFNg pg/ml`,
+                 tnf    = `Lung TNF pg/ml`,
+                 il12   = `Lung IL-12 pg/ml`,
+                 il10   = `Lung IL-10 pg/ml`,
+                 mmp8   = `Lung MMP8 (pg/ml)`,
+                 vegf   = `Lung VEGF (pg/ml)`,
+                 s100a8 = `Lung S100A8 (pg/ml)`) %>%
+          mutate(sample = as.character(sample))
+```
+
+Read in Gene Expression data.
+
+```{r read_expr}
+expr1 = read_xlsx(str_c(expr_dir, '2017-05-26_Beamer_analysis.xlsx'),
+                  range = 'A2:CM25208')
+expr2 = read_xlsx(str_c(expr_dir, '2016-12-09_Beamer_analysis (2) - gb.xlsx'),
+                  range = 'A2:CG25208')
+```
+
+Reshape and merge data.
+
+```{r reshape_expr}
+expr1 = expr1 %>%
+          select(`Brainarray probeset ID`:`KEGG Pathway(s)`, starts_with('Res'), starts_with('Su'))
+expr2 = expr2 %>%
+          select(`Brainarray probeset ID`:`KEGG Pathway(s)`, starts_with('Res'), starts_with('Su'))
+expr = full_join(expr1, expr2) %>%
+          rename(probeset = `Brainarray probeset ID`,
+                 entrez   = `Mouse Entrez Gene ID`,
+                 human_entrez = `Human Entrez Gene ID`,
+                 symbol   = Symbol,
+                 desc     = Description,
+                 go       = `GO Term(s)`,
+                 kegg     = `KEGG Pathway(s)`)
+rm(expr1, expr2)
+annot = expr %>%
+          select(probeset:kegg)
+expr = expr %>%
+         select(entrez, starts_with('Res'), starts_with('Su')) %>%
+         gather(sample, expr, -entrez) %>%
+         separate(sample, into = c('group', 'sample')) %>%
+         left_join(select(pheno, sample, dose), by = 'sample') %>%
+         spread(entrez, expr)
+expr$dose[expr$sample == '375'] = 28
+```
+
+## Expression distribution per sample
+
+```{r expr_dist}
+expr_mat = as.matrix(expr[,-(1:3)])
+rownames(expr_mat) = expr$sample
+
+q = apply(expr_mat, 1, quantile, probs = c(0:9/10))
+
+as.data.frame(t(q)) %>%
+  rownames_to_column(var = 'sample') %>%
+  gather(quantile, value, -sample) %>%
+  ggplot() +
+    geom_line(aes(sample, value, group = quantile, color = quantile))
+```
+
+The plot above shows expression quantiles for each sample. There is a clear step between batches. But no individual samples seems to be out of line with the others.
+
+## PCA of gene expression
+
+```{r pca_expr}
+expr_std = apply(expr_mat, 2, scale)
+pcex = pca(expr_std, nPcs = 10)
+
+as_tibble(scores(pcex)) %>%
+  mutate(sample = expr$sample) %>%
+  left_join(select(expr, sample, dose), by = 'sample') %>%
+  ggplot() +
+    geom_point(aes(PC1, PC2, color = factor(dose))) +
+    labs(title = 'Sample PCs before batch normalization', legend = 'Dose')
+```
+
+The plot above shows each sample in the first and second PC, colored by dose. Dose is completely counfounded with microarray batch. However, we should regress out dose/batch before proceeding.
+
+I will regress out dose and retain the residuals. Then I will add the grand mean back into the residuals for each gene.
+
+```{r expr_batch}
+expr_resid = expr_mat
+expr_mean = colMeans(expr_mat)
+for(i in 1:ncol(expr_mat)) {
+  mod = lm(expr_mat[,i] ~ expr$dose, na.action = na.exclude)
+  expr_resid[,i] = residuals(mod) + expr_mean[i] 
+} # for(i)
+```
+
+Run PCA on the batch normalized data.
+
+```{r pca_expr2}
+expr_std = apply(expr_resid, 2, scale)
+pcex = pca(expr_std, nPcs = 10)
+
+as_tibble(scores(pcex)) %>%
+  mutate(sample = expr$sample) %>%
+  left_join(select(expr, sample, dose), by = 'sample') %>%
+  ggplot() +
+    geom_point(aes(PC1, PC2, color = factor(dose))) +
+    labs(title = 'Sample PCs before after normalization')
+```
+
+Plot PCs colored by group.
+
+```{r expr_pca_class}
+as_tibble(scores(pcex)) %>%
+  mutate(sample = expr$sample) %>%
+  left_join(select(pheno, sample, class), by = 'sample') %>%
+  mutate(class = factor(class, levels = c('Resistant', 'Susceptible', 'Supersusceptible'))) %>%
+  ggplot() +
+    geom_point(aes(PC1, PC2, color = class)) +
+    scale_color_viridis_d(direction = -1) + 
+    labs(title = 'Sample PCs before after normalization')
+```
+
+## Normalize the phenotypes.
+
+```{r pheno_norm}
+pheno = pheno %>%
+          select(sample, expt, run:s100a8) %>%
+          filter(sample %in% rownames(expr_resid))
+
+pheno_mat = as.matrix(log1p(pheno[,-(1:7)]))
+rownames(pheno_mat) = pheno$sample
+
+pheno_std = apply(pheno_mat, 2, scale)
+pcph = pca(pheno_std, nPcs = ncol(pheno_std))
+
+as_tibble(scores(pcph)) %>%
+  mutate(sample = rownames(pheno_mat)) %>%
+  left_join(select(pheno, sample, dose, class), by = 'sample') %>% 
+  mutate(dose = factor(dose),
+         class = factor(class, levels = c('Resistant', 'Susceptible', 'Supersusceptible'))) %>% 
+  ggplot() +
+    geom_point(aes(PC1, PC2, shape = dose, color = class), size = 3) +
+    labs(title = 'PC of phenotypes')
+```
+
+The plot above shows the phenotypes, colored by susceptibility class with dose shown as symbols. PC1 seems to correlate with class and PC2 correlates with dose.
+
+```{r pc_plot}
+pcex1 = as_tibble(scores(pcex)[,1:2]) %>%
+          mutate(sample = expr$sample)
+pcph1 = as_tibble(scores(pcph)[,1:2]) %>%
+          mutate(sample = pheno$sample)
+full_join(pcex1, pcph1, by = 'sample') %>%
+  ggplot(aes(PC1.x, PC1.y)) +
+    geom_point() +
+    geom_smooth(method = 'lm') +
+    labs(title = 'PC1 of expression & phenotypes', x = 'Expression PC1',
+         y = 'Phenotype PC1')
+```
+
+```{r}
+full_join(pcex1, pcph1, by = 'sample') %>%
+  ggplot(aes(PC.2x, PC2.y)) +
+    geom_point() +
+    geom_smooth(method = 'lm') +
+    labs(title = 'PC2 of expression & phenotypes', x = 'Expression PC2',
+         y = 'Phenotype PC2')
+```
+
+
+
+Get expression means and variances.
+
+```{r}
+expr_mean = colMeans(expr_mat)
+expr_sd   = apply(expr_mat, 2, sd)
+
+plot(expr_mean, expr_sd)
+```
+
+```{r}
+wh = which(expr_sd > 2.5)
+for(i in wh) {
+  plot(rownames(expr_mat), expr_mat[,i], pch = 16, col = factor(expr$dose))
+}
+```
+
+
+
+
+
+

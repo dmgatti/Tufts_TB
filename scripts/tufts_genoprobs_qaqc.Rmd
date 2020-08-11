@@ -1,0 +1,446 @@
+---
+title: "Genoprobs QA/QC"
+author: "Daniel Gatti"
+date: "February 18, 2020"
+output: 
+  html_document:
+      toc: true
+      toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+library(knitr)
+library(qtl2)
+library(readxl)
+library(tidyverse)
+
+base_dir = '/media/dmgatti/hdb/projects/TB'
+geno_dir = file.path(base_dir, "data/genotypes")
+hap_dir  = file.path(base_dir, "haplo_reconstr")
+gigamuga_url = 'https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/gm_uwisc_v1.csv'
+muga_dir = '/media/dmgatti/hda/data/MUGA'
+pheno_file = file.path(base_dir, 'data', 'phenotypes', '2020-02-17 JDO TB lung phenotypes.xlsx')
+```
+
+## Read in data
+
+Load in the allele probs.
+
+```{r read_probs}
+aprobs = readRDS(file = file.path(hap_dir, "tufts_do_alleleprobs.rds"))
+```
+
+```{r read_pheno}
+# Read in the phenotypes.
+pheno = readxl::read_xlsx(pheno_file)
+pheno = pheno[,c('Mouse #', 'Coat color', 'Mouse strain', 'DOB or generation')]
+colnames(pheno) = c('mouse', 'coat', 'strain', 'gen')
+pheno$gen[pheno$gen == '41566'] = 'G16'
+pheno$gen[pheno$gen == '41695'] = 'G17'
+pheno$mouse = as.character(pheno$mouse)
+```
+
+## Founder allele probabilities for each sample.
+
+Perform QC on the allele probs.
+
+```{r founder_freq_per_sample}
+fps = matrix(0.0, nrow(aprobs[[1]]), ncol(aprobs[[1]]))
+for(p in aprobs) {
+  fps = fps + apply(p, 1:2, sum)
+} # for(p)
+fps = fps / sum(sapply(aprobs, dim)[3,])
+
+fps = cbind(fps, min = apply(fps, 1, min), max = apply(fps, 1, max))
+write.csv(fps, file = file.path(base_dir, 'results', 'founder_freq_sample.csv'), quote = FALSE, row.names = FALSE)
+```
+
+Plot the founder allele frequencies for each sample.
+
+```{r plot_sample_freq,fig.height=10,fig.width=10}
+cccolors2 = qtl2::CCcolors
+names(cccolors2) = LETTERS[1:8]
+data.frame(fps) %>%
+  rownames_to_column(var = "id") %>%
+  select(-min, -max) %>%
+  gather(founder, freq, -id) %>%
+  ggplot() +
+  geom_line(aes(id, freq, color = founder, group = founder)) +
+  geom_abline(aes(intercept = 0.125, slope = 0)) +
+  scale_color_manual(values = cccolors2) +
+  facet_wrap(~founder, nrow = 8) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1)) +
+  labs(title = "Founder Allele Frequencies by Sample", y = "Founder Freq.")
+```
+
+We can clearly see the C57BL/6J samples. Extract those and make sure that they're the ones that we expect. There are also some BL6 F1s in here for some reason. Those might be Ron Korstaje's samples.
+
+Are the mice listed as C57BL/6J in the phenotype file all BL6?
+ 
+```{r}
+bl6_in_pheno = subset(pheno, grepl('C57BL', pheno$strain))
+bl6_in_pheno$mouse = as.character(bl6_in_pheno$mouse)
+
+fps_df = as.data.frame(fps) %>%
+           rownames_to_column(var = 'id') %>%
+           mutate(mouse = str_replace(id, '^g[0-9]_', ''))
+
+bl6_pheno_fp = left_join(bl6_in_pheno, select(fps_df, id, B, mouse)) %>%
+               arrange(mouse)
+
+kable(bl6_pheno_fp, digits = 3)
+```
+ 
+NA means that the samples are not in the genotype data. This is OK because we don't need to genotype BL6 mice. However, for samples 179 to 184, the group 1 samples are correct and the group 2 samples appear to be BL6 F1s.
+ 
+ 
+Which mice are mostly BL6 in the founder probs, but aren't listed as so in the phenotypes?
+
+```{r}
+bl6_in_fp = fps_df %>%
+              select(id, B, mouse) %>%
+              filter(B > 0.45) %>%
+              mutate(mouse = str_replace(mouse, '\\.1$', '')) %>%
+              arrange(mouse)
+
+# Which
+bl6_fp_pheno = left_join(bl6_in_fp, bl6_in_pheno)
+kable(bl6_fp_pheno, digits = 3)
+```
+
+NA means that we don't have these samples in phenotypes. I don't see any DO mice in the list, so this is good.
+
+I'm going to remove the mice that have BL6 contributions >= 0.45 from the founder probs.
+
+```{r remove_bl6}
+bl6_high = which(fps[,'B'] >= 0.45)
+keep = setdiff(rownames(aprobs[[1]]), names(bl6_high))
+
+for(i in seq_along(aprobs)) {
+  aprobs[[i]] = aprobs[[i]][keep,,]
+} # for(i)
+
+fps = fps[keep,]
+```
+
+Plot the founder allele frequency distribution for each sample.
+
+```{r plot_sample_freq_density}
+data.frame(fps) %>%
+  rownames_to_column(var = "id") %>%
+  select(-min, -max) %>%
+  gather(founder, freq, -id) %>%
+  ggplot() +
+  geom_density(aes(freq, color = founder)) +
+  geom_vline(aes(xintercept = 0.125), size = 1) +
+  scale_color_manual(values = cccolors2) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1)) +
+  labs(title = "Density of Founder Allele Frequencies by Sample")
+```
+
+PWK (in red) is known to have a lower allele frequency than the other founders. The black line in the center is the 1/8th (0.125) line.
+
+## Founder Allele Probabilities along Chromosomes
+
+Look at the founder allele frequencies along each chromosome.
+
+```{r founder_freq_by_chr}
+fpc = vector("list", length(aprobs))
+names(fpc) = names(aprobs)
+for(p in seq_along(aprobs)) {
+  fpc[[p]] = apply(aprobs[[p]], 2:3, mean)
+} # for(p)
+
+tmp = t(fpc[[1]])
+for(p in 2:length(fpc)) {
+  tmp = rbind(tmp, t(fpc[[p]]))
+} # for(p)
+fpc = tmp
+rm(tmp)
+
+write.csv(fpc, file = file.path(base_dir, "results', 'founder_freq_marker.csv"), quote = FALSE, row.names = FALSE)
+```
+
+```{r plot_founder_freq_marker,fig.height=16,fig.width=8}
+markers = readr::read_csv(file.path(muga_dir, 'gm_uwisc_v1.csv'), col_types = 'ccnnncclllnnc') %>%
+            select(marker, chr, pos = bp_mm10)
+data.frame(fpc) %>%
+  rownames_to_column(var = "marker") %>%
+  inner_join(y = select(markers, chr, marker, pos)) %>%
+  mutate(pos = pos * 1e-6,
+         chr = factor(chr, levels = c(1:19, 'X'))) %>%
+  gather(founder, freq, -marker, -chr, -pos) %>%
+  ggplot() +
+  geom_line(aes(pos, freq, color = founder)) +
+  geom_hline(aes(yintercept = 0.125), linetype = 2) +
+  scale_color_manual(values = cccolors2) +
+  facet_wrap(~chr, ncol = 1) +
+  labs(title = "Founder Allele Frequency by Chromosome")
+```
+
+
+Some of the allele frequencies are quite high. On Chr X, 129S1 and NOD are high while WSB and PWK are low. PWK is somewhat expected. 
+
+## Number of Recombinations per Sample.
+
+```{r recomb_per_sample}
+cross = qtl2::read_cross2(file = file.path(hap_dir, "qtl2/tufts.json"), quiet = FALSE)
+cross = cross[keep,]
+vit = qtl2:::viterbi2(cross = cross, quiet = FALSE, cores = 8)
+saveRDS(vit, file = file.path(base_dir, "results/viterbi.rds"))
+
+num_recomb = rep(0, nrow(vit[[1]]))
+names(num_recomb) = rownames(vit[[1]])
+
+for(v in vit) {
+  vdiff = abs(diff(t(v)))
+  num_recomb = num_recomb + colSums(vdiff > 0)
+} # for(v)
+
+num_recomb = data.frame(num_recomb) %>%
+               rownames_to_column(var = "id")
+```
+
+```{r dist_num_recomb}
+num_recomb %>%
+  ggplot() +
+  geom_density(aes(num_recomb)) +
+  labs(title = "Distribution of Numer of Recombinations per Sample")
+```
+
+Plot the number of recombinations per sample by generation. We don't have generation data for the last set of mice yet.
+
+```{r plot_recomb_per_sample}
+num_recomb = num_recomb %>%
+               mutate(mouse = str_replace(id, '^g[0-9]_', '')) %>%
+               mutate(mouse = str_replace(mouse, '^Tufts_GB(2)?_', '')) %>%
+               left_join(pheno)
+
+num_recomb %>%
+  ggplot() +
+  geom_boxplot(aes(gen, num_recomb, color = gen)) +
+  geom_jitter(aes(gen, num_recomb, color = gen)) +
+  labs(title = "Number of Recombinations per Sample") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1))
+```
+
+The last set (labelled NA) are the latest mice for which we lack phenotype data. There are a few mice in that group with low recombinations. They may be reruns from earlier generations.
+
+Look at those low-recombination samples in the NA group.
+
+```{r}
+num_recomb %>%
+  filter(is.na(gen) & num_recomb < 600)
+```
+
+This is an unknown sample. 
+
+## Genotyping Replicates
+
+Some of these are the exact same data run through the haplotype reconstruction twice.
+
+```{r compare_replicates}
+dupl = data.frame(id = rownames(aprobs[[1]])) %>%
+          mutate(mouse = str_replace(id, '^g[0-9]_', ''),
+                 mouse = str_replace(mouse, '^Tufts_GB(2)?_', '')) %>%
+          group_by(mouse) %>%
+          filter(n() > 1) %>%
+          arrange(mouse)
+
+dupl_cor = matrix(0, nrow = nrow(dupl), ncol = nrow(dupl),
+                  dimnames = list(dupl$id, dupl$id))
+
+for(i in seq_along(aprobs)) {
+  
+  print(paste('chr', i))
+  
+  tmp = aprobs[[i]][dupl$id,,]
+  
+  for(j in 1:dim(tmp)[3]) {
+    dupl_cor = dupl_cor + cor(t(tmp[,,j]))
+  } # for(j)
+  
+} # for(i)
+
+dupl_cor = dupl_cor / rowSums(sapply(aprobs, dim))[3]
+```
+
+```{r}
+dupl_samples = data.frame(mouse = unique(dupl$mouse),
+                          geno_cor = 0)
+
+for(i in 1:nrow(dupl_samples)) {
+  
+  ids = dupl$id[dupl$mouse == dupl_samples$mouse[i]]
+  dupl_samples$geno_cor[i] = mean(dupl_cor[ids,ids][lower.tri(dupl_cor[ids,ids])])
+
+} # for(i)
+
+ggplot(dupl_samples) +
+  geom_histogram(aes(geno_cor))
+```
+
+There is one mouse with poor duplication.
+
+```{r}
+filter(dupl_samples, geno_cor < 0.9)
+```
+
+For most of the samples, we can use either run. But for sample 230, we need to select one of the replicates or discard the sample completely.
+
+```{r}
+sample_230_ids = filter(dupl, mouse == 230)
+for(i in 1:nrow(sample_230_ids)) {
+   qtl2::plot_genoprob(aprobs[sample_230_ids$id[i],], map = cross$pmap, main = sample_230_ids$id[i])
+}
+```
+
+The run from G3 is off. But the other two runs are probably from the same data. I can't tell which one is correct right now.
+
+## Coat Color Checks
+
+The Albino locus is on Chr 7 at 87.42 - 87.49 Mb (Tyr) and the Agouti locus is on Chr 2 at 154.79 - 155.05 Mb (a). Mice carrying the A and D alleles at the albino locus will be albino. Mice carrying the A or B alleles on Chr 2 that aren't albino will be black. We can compare the coat color in the phenotype data with the founder allele at the albino locus to determine if there has been a sample mixup.
+
+Remove the C57BL/6J mice and change the coat colors to wh, br & bl.
+
+```{r}
+pheno = subset(pheno, !grepl('C57BL/6J', coat))
+pheno = pheno %>%
+          mutate(coat = if_else(coat == 'w', 'wh', coat),
+                 coat = str_replace(coat, 'w/( )?wh belly( & tail tio)?$', ''),
+                 coat = str_replace(coat, 'w/wh (head spot|tail tip)$', ''),
+                 coat = str_replace(coat, '^lt ', ''),
+                 coat = str_replace(coat, '\\+wh head spot$', ''),
+                 coat = str_trim(coat))
+count(pheno, coat)
+```
+
+Get the founder allele calls on Chr 7 near the Tyr locus.
+
+```{r get_tyr_gt}
+# Markers near Tyr gene.
+tyr_mkr = subset(markers, chr == '7' & pos >= 87400000 & pos <= 87500000)
+tyr_mkr = tyr_mkr[tyr_mkr$marker %in% dimnames(aprobs[[7]])[[3]],]
+a_mkr   = subset(markers, chr == '2' & pos >= 154790000 & pos <= 155100000)
+a_mkr   = a_mkr[a_mkr$marker %in% dimnames(aprobs[[2]])[[3]],]
+# Get the probs for the agouti locus.
+pr_2 = aprobs[[2]][,,a_mkr$marker]
+# Get the probs for the albino locus.
+pr_7 = aprobs[[7]][,,tyr_mkr$marker]
+
+samples = sub('^g[0-9]_', '', rownames(pr_7))
+samples = sub('^Tufts_GB(2)?_', '', samples)
+
+# For each sample, list the sample ID, listed coat color, prob of A/D and A/B genotypes.
+samples = data.frame(geno_id = rownames(pr_7), sample = samples, coat = NA, prob_AD = NA, prob_AB = NA, remove = F)
+
+for(i in 1:nrow(samples)) {
+  
+  # Get the phenotype row for this sample.
+  pheno_wh = which(pheno$mouse == samples$sample[i])
+  
+  # If the sample was found, match up coat color with genotype probs.
+  if(length(pheno_wh) > 0) {
+    # Assing coat color.
+    samples$coat[i] = pheno$coat[pheno_wh]
+    # Assign A/D prob.
+    samples$prob_AD[i] = sum(rowMeans(pr_7[i,,])[c('A', 'D')])
+    # Assign A/B prob.
+    samples$prob_AB[i] = sum(rowMeans(pr_2[i,,])[c('A', 'B')])
+  } # if(length(wh) > 0)
+  
+} # for(i)
+```
+
+Which samples were listed as having a white coat in the phenotype file but don't have an AA, AD or DD genotype?
+
+```{r which_coat_non_geno}
+filter(samples, coat == 'wh' & prob_AD < 0.9)
+```
+
+Three samples: 375, 404 & 603.
+
+Which samples have AA, AD or DD genotypes but aren't listed as 'white' in the phenotype file?
+
+```{r white_geno_not_pheno}
+filter(samples, coat != 'wh' & prob_AD > 0.9)
+```
+
+Three samples: 230, 405 & 605.
+
+Which samples were listed as having a black coat in the phenotype file but don't have an AA, AB or BB genotype?
+
+```{r black_coat_non_geno}
+filter(samples, coat == 'bl' & prob_AB < 0.9)
+```
+
+One sample: 333.
+
+Which samples have AA, AB or BB genotypes and are not albino but aren't listed as 'black' in the phenotype file?
+
+```{r black_geno_not_pheno}
+filter(samples, coat != 'bl' & prob_AB > 0.9 & prob_AD < 0.9)
+```
+
+Three samples: 332, 514, 603.
+
+For 230, the sample in batch 3 differs from the other batches and does not have the correct coat color. I will remove that sample.
+Samples 375 and 514 do not have the correct coat color. I will remove them. 
+
+```{r remove_coat_mismatch}
+remove = c('g3_230', 'g1_375', 'g2_375', 'g1_514')
+for(i in seq_along(aprobs)) {
+  aprobs[[i]] = aprobs[[i]][!rownames(aprobs[[i]]) %in% remove,,]
+} # for(i)
+```
+
+Samples 332 & 333, 404 & 405, and 603 and 605 may have been swapped. I will swap them in the genotype data.
+
+```{r swap_coat_mismatch}
+swap = data.frame(old = c('g1_332', 'g1_333', 'g2_333', 'g1_404', 'g2_404', 'g1_405', 'g1_603', 'g1_605'),
+                  new = c('g1_333', 'g1_332', 'g2_332', 'g1_405', 'g2_405', 'g1_404', 'g1_605', 'g1_603'))
+rn = rownames(aprobs[[1]])
+wh = match(swap$old, rn)
+rn[wh] = swap$new
+
+for(i in seq_along(aprobs)) {
+  rownames(aprobs[[i]]) = rn
+} # for(i)
+```
+
+## Remove Duplicates
+
+Keep only unique samples and write out the cleaned founder allele probs.
+
+```{r remove_dupl}
+samples = data.frame(geno_id = rownames(aprobs[[1]]),
+                     sample  = NA,
+                     dupl    = F)
+samples$sample = sub('^g[0-9]_',       '', samples$geno_id)
+samples$sample = sub('^Tufts_GB(2)?_', '', samples$sample)
+samples$dupl = duplicated(samples$sample)
+keep = which(!samples$dupl)
+
+for(i in seq_along(aprobs)) {
+
+  aprobs[[i]] = aprobs[[i]][keep,,]
+  rownames(aprobs[[i]]) = samples$sample[keep]
+
+} # for(i)
+```
+
+Dimensions of allele probs. Each element represents one chromosome with dimensions of samples, by founders by markers.
+
+```{r}
+sapply(aprobs, dim)
+```
+
+
+Write out the cleaned founder allele probs.
+
+```{r write_cleaned_probs}
+saveRDS(aprobs, file = file.path(hap_dir, 'tufts_do_alleleprobs_cleaned.rds'))
+```
+

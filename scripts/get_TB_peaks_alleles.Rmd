@@ -1,0 +1,98 @@
+---
+title: "QT Peaks for TB project"
+author: "Daniel Gatti"
+date: "October 1, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+library(qtl2)
+base_dir = '/media/dmgatti/hdb/projects/TB/'
+```
+
+Share data.
+
+Get peaks at a lower threshold (0.63?) with allele effects.
+
+Do both Tufts and FDA.
+
+Read in the permutations.
+
+```{r get_perms}
+perms = readRDS(str_c(base_dir, 'results/qtl2/dose_as_factor/perms.rds'))
+quantile(perms, probs = 0:20/20)
+```
+
+Get the marker map
+```{r get_map}
+load(file = str_c(base_dir, "data/phenotypes/GB_Tufts_qtl2_input.Rdata"))
+rm(pheno, pheno_rz, covar, K, probs)
+```
+
+
+Get the results files.
+
+```{r}
+result_dir = str_c(str_c(base_dir, 'results/qtl2/dose_as_factor/'))
+res_files = list.files(result_dir, pattern = '_qtl2\\.Rdata$')
+res_files = res_files[-grep('^PC', res_files)]
+```
+
+Read in each results file and get peaks at a lower threshold.
+
+```{r}
+peaks = NULL
+
+for(f in res_files) {
+  
+  pheno_name = str_replace(f, '_qtl2\\.Rdata$', '')
+  print(pheno_name)
+  
+  # Loads in assocs, coefs, lod.
+  load(str_c(result_dir, f))
+  
+  # Get the peaks.
+  fp = find_peaks(lod, map = map, threshold = 6)[,-1]
+  # Get the p-value.
+  fp = data.frame(fp, p_value = colMeans(sapply(fp$lod, '<', perms)))
+  # Get the associated markers.
+  fp = data.frame(fp, mkr = find_marker(map, fp$chr, fp$pos))
+  # Add coef columns.
+  fp = data.frame(fp, matrix(0, nrow = nrow(fp), ncol = 8, dimnames = list(NULL, LETTERS[1:8])))
+  
+  for(j in 1:nrow(fp)) {
+    
+    local_coef = coefs[[j]][fp$mkr[j], LETTERS[1:8]]
+    local_coef = local_coef - mean(local_coef)
+    fp[j, LETTERS[1:8]] = local_coef
+    
+  } # for(j)
+  
+  peaks = rbind(peaks, fp)
+  
+} # for(f)
+```
+
+
+```{r tidy_column_names}
+colnames(peaks)[1] = 'phenotype'
+colnames(peaks)[7] = 'A_J'
+colnames(peaks)[8] = 'C57BL_6J'
+colnames(peaks)[9] = '129S1_SvImJ'
+colnames(peaks)[10] = 'NOD_ShiLtJ'
+colnames(peaks)[11] = 'NZO_HlLtJ'
+colnames(peaks)[12] = 'CAST_EiJ'
+colnames(peaks)[13] = 'PWK_PhJ'
+colnames(peaks)[14] = 'WSB_EiJ'
+```
+
+Write out the results.
+
+```{r}
+write.csv(peaks, file = str_c(result_dir, 'tb_qtl_peaks_coefs.csv'), quote = FALSE, row.names = FALSE)
+```
+
+
+

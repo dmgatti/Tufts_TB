@@ -1,0 +1,306 @@
+
+R version 3.3.1 (2016-06-21) -- "Bug in Your Hair"
+Copyright (C) 2016 The R Foundation for Statistical Computing
+Platform: x86_64-pc-linux-gnu (64-bit)
+
+R is free software and comes with ABSOLUTELY NO WARRANTY.
+You are welcome to redistribute it under certain conditions.
+Type 'license()' or 'licence()' for distribution details.
+
+R is a collaborative project with many contributors.
+Type 'contributors()' for more information and
+'citation()' on how to cite R or R packages in publications.
+
+Type 'demo()' for some demos, 'help()' for on-line help, or
+'help.start()' for an HTML browser interface to help.
+Type 'q()' to quit R.
+
+> ################################################################################
+> # Mapping to TB traits in Gillian Beamer's DO data.
+> # Daniel Gatti
+> # dan.gatti@jax.org
+> # Nov. 21, 2016
+> ################################################################################
+> library(DOQTL)
+Loading required package: BSgenome.Mmusculus.UCSC.mm10
+Loading required package: BSgenome
+Loading required package: BiocGenerics
+Loading required package: parallel
+
+Attaching package: 'BiocGenerics'
+
+The following objects are masked from 'package:parallel':
+
+    clusterApply, clusterApplyLB, clusterCall, clusterEvalQ,
+    clusterExport, clusterMap, parApply, parCapply, parLapply,
+    parLapplyLB, parRapply, parSapply, parSapplyLB
+
+The following objects are masked from 'package:stats':
+
+    IQR, mad, xtabs
+
+The following objects are masked from 'package:base':
+
+    Filter, Find, Map, Position, Reduce, anyDuplicated, append,
+    as.data.frame, cbind, colnames, do.call, duplicated, eval, evalq,
+    get, grep, grepl, intersect, is.unsorted, lapply, lengths, mapply,
+    match, mget, order, paste, pmax, pmax.int, pmin, pmin.int, rank,
+    rbind, rownames, sapply, setdiff, sort, table, tapply, union,
+    unique, unsplit, which, which.max, which.min
+
+Loading required package: S4Vectors
+Loading required package: stats4
+
+Attaching package: 'S4Vectors'
+
+The following objects are masked from 'package:base':
+
+    colMeans, colSums, expand.grid, rowMeans, rowSums
+
+Loading required package: IRanges
+Loading required package: GenomeInfoDb
+Loading required package: GenomicRanges
+Loading required package: Biostrings
+Loading required package: XVector
+Loading required package: rtracklayer
+Loading required package: VariantAnnotation
+Loading required package: SummarizedExperiment
+Loading required package: Biobase
+Welcome to Bioconductor
+
+    Vignettes contain introductory material; view with
+    'browseVignettes()'. To cite Bioconductor, see
+    'citation("Biobase")', and for packages 'citation("pkgname")'.
+
+
+Attaching package: 'SummarizedExperiment'
+
+The following objects are masked from 'package:IRanges':
+
+    acbind, arbind
+
+Loading required package: Rsamtools
+
+Attaching package: 'VariantAnnotation'
+
+The following object is masked from 'package:base':
+
+    tabulate
+
+Warning messages:
+1: multiple methods tables found for 'arbind' 
+2: multiple methods tables found for 'acbind' 
+3: replacing previous import 'IRanges::arbind' by 'SummarizedExperiment::arbind' when loading 'GenomicAlignments' 
+4: replacing previous import 'IRanges::acbind' by 'SummarizedExperiment::acbind' when loading 'GenomicAlignments' 
+5: replacing previous import 'IRanges::arbind' by 'SummarizedExperiment::arbind' when loading 'VariantAnnotation' 
+6: replacing previous import 'IRanges::acbind' by 'SummarizedExperiment::acbind' when loading 'VariantAnnotation' 
+> setwd("/hpcdata/dgatti/Tufts/")
+> 
+> # Load the file generated in tufts_gather_data.R.
+> load(file = "data/GB_Tufts_mapping_input.Rdata")
+> 
+> setwd("QTL")
+> 
+> for(i in 1:ncol(pheno.rz)) {
++ 
++   t1 = proc.time()[3]
++   print(paste(i, "of", ncol(pheno.rz)))
++   pheno.name = colnames(pheno.rz)[i]
++ 
++   qtl = scanone(pheno = pheno.rz, pheno.col = i, probs = probs, K = K,
++         addcovar = covar, snps = snps)
++   saveRDS(qtl, file = paste0(pheno.name, "_QTL.rds"))
++ 
++   png(paste0(pheno.name, "_QTL.png"), width = 1000, height = 800, res = 128)
++   plot(qtl, sig.thr = 7.2, main = pheno.name)
++   dev.off()
++ 
++   for(j in 1:19) {
++ 
++     png(paste0(pheno.name, "_coef_chr", j,".png"), width = 1000, height = 800, 
++         res = 128)
++     coefplot(qtl, chr = j, main = pheno.name)
++     dev.off()
++ 
++   } # for(j)
++ 
++   print(proc.time()[3] - t1)
++ 
++ } # for(i)
+[1] "1 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Mtb.burden..average."
+elapsed 
+525.761 
+[1] "2 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Mtb.burden..1."
+elapsed 
+278.707 
+[1] "3 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Mtb.burden..2."
+elapsed 
+280.806 
+[1] "4 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Lung.CXCL5.pg.ml"
+elapsed 
+216.337 
+[1] "5 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Lung.CXCL2.pg.ml"
+elapsed 
+212.446 
+[1] "6 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Lung.CXCL1.pg.ml"
+elapsed 
+ 210.98 
+[1] "7 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "X..Normal.lung..average."
+elapsed 
+183.552 
+[1] "8 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "X..Normal.lung..1."
+elapsed 
+187.494 
+[1] "9 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Percent.Normal.Lung..2."
+elapsed 
+ 185.66 
+[1] "10 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Lung.IFNg.pg.ml"
+elapsed 
+213.164 
+[1] "11 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Lung.TNF.pg.ml"
+elapsed 
+243.463 
+[1] "12 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Lung.IL.12.pg.ml"
+elapsed 
+223.983 
+[1] "13 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Lung.IL.10.pg.ml"
+elapsed 
+200.952 
+[1] "14 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Peak.Body.Weight..gm."
+elapsed 
+ 187.53 
+[1] "15 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "BW.at.euth..gm."
+elapsed 
+194.488 
+[1] "16 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "X..peak.BW.at.euth"
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+elapsed 
+201.959 
+[1] "17 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Wt.lost..gm."
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+elapsed 
+196.578 
+[1] "18 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Day.of.disease.onset"
+elapsed 
+186.226 
+[1] "19 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Survival"
+elapsed 
+232.447 
+[1] "20 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Duration.of.wt.loss..days."
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+elapsed 
+209.354 
+[1] "21 of 21"
+[1] "Mapping with 431 samples."
+[1] "Mapping with 120789 markers."
+[1] "Rate.of.wt.loss..gm.day."
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+Warning: solution lies close to zero for some positive variance components, their standard errors may not be valid
+elapsed 
+188.084 
+> 
+> 
+> 
+> proc.time()
+    user   system  elapsed 
+4756.622   57.568 4835.152 

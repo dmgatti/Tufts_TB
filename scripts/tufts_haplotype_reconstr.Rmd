@@ -1,0 +1,361 @@
+---
+title: "Tufts Haplotype Reconstruction"
+author: "Daniel Gatti"
+date: "December 30, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+options(stringsAsFactors = FALSE)
+knitr::opts_chunk$set(echo = FALSE)
+library(knitr)
+library(readxl)
+library(argyle)
+library(tidyverse)
+library(qtl2)
+library(qtl2convert)
+
+base_dir = "/media/dmgatti/hdb/projects/TB/"
+geno_dir = paste0(base_dir, "data/genotypes/")
+hap_dir = paste0(base_dir, "haplo_reconstr/")
+gigamuga_url = 'https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/gm_uwisc_v1.csv'
+muga_dir = '/media/dmgatti/hda/data/MUGA/'
+```
+
+NOTE: Some of the genotypes were downloaded from dodb.jax.org. Theses are from files that are at JAX. We have the Geneseek files for more recently genotyped samples.
+
+Karl Broman at Univ. of Wisconsin [https://kbroman.org/MUGAarrays/new_annotations.html](remapped the GigaMUGA markers) and has produced a new  [https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/mini_uwisc_v1.csv](marker annotation file).
+
+```{r read_markers}
+# Read in the U. Wisc. remapped markers.
+markers = readr::read_csv(str_c(muga_dir, 'gm_uwisc_v1.csv'), col_types = 'ccnnncclllnnc') %>%
+          filter(!is.na(chr)) %>%
+          as.data.frame()
+colnames(markers)[3:4] = c('pos', 'cM')
+rownames(markers) = markers$marker
+
+map  = qtl2convert::map_df_to_list(map = markers, pos_column = 'pos')
+gmap = qtl2convert::map_df_to_list(map = markers, pos_column = 'cM')
+
+markers = markers[,c(2,1,4,3)]
+
+# Also load UNC markers.
+load(paste0(muga_dir, "snps.gigamuga.Rdata"))
+```
+
+Check the marker name overlap. All of the markers in 'marker' are in 'snps' from UNC.
+
+```{r check_markers}
+all(rownames(markers) %in% rownames(snps))
+```
+
+Load in the Geneseek data that we have.
+
+```{r gather_geno}
+data_dirs = dir(geno_dir, pattern = '^Tufts', full.names = TRUE)
+data_dirs = data_dirs[-grep('csv|rds', data_dirs)]
+
+# Variables for genotypes and samples.
+geno    = NULL
+samples = NULL
+
+# Read in all of the data and merge into one large object.
+for(d in data_dirs) {
+  
+  print(d)
+  
+  ds = unlist(strsplit(d, split = "/"))
+  ds = ds[length(ds)]
+  
+  tmp = read.beadstudio(prefix = "ds__", snps = snps, in.path = d)
+  samples = rbind(samples, cbind(ds, samples(tmp)))
+
+  if(is.null(geno)) {
+    geno = tmp
+  } else {
+    geno = cbind.genotypes(geno, tmp) 
+  }
+
+} # for(d)
+```
+
+Load in the genotypes file from the JAX [https://dodb.jax.org](DODB).
+
+```{r load_dodb_geno}
+geno2 = readr::read_csv(str_c(geno_dir, 'complete_Beamer-Tufts_Beamer/Beamer-Tufts_Beamer-GigaMUGA-calls.csv'),
+                        col_types = str_c('ccn', str_c(rep('c', 443), collapse = '')))
+# Change allele calls to A, C, G, T, H, N.
+geno2 = geno2 %>%
+          select(-chr, -pos) %>%
+          gather(sample, call, -marker) %>%
+          mutate(sample = str_c('g2_', sample)) %>%
+          mutate(call = str_replace(call, 'AA', 'A'),
+                 call = str_replace(call, 'CC', 'C'),
+                 call = str_replace(call, 'GG', 'G'),
+                 call = str_replace(call, 'TT', 'T'),
+                 call = str_replace(call, '--', 'N'),
+                 call = str_replace(call, regex('AC|CA|AG|GA|AT|TA|CG|GC|CT|TC|GT|TG'), 'H'))
+stopifnot(distinct(geno2, call)  %>% pull(call) %>% nrow() == 6)
+```
+
+There is one more file that contains genotypes from a UNC run.
+
+```{r gather_extra_geno}
+extra = read.csv(paste0(geno_dir, 'Tufts_GB_sample_genotypes.csv'))
+colnames(extra) = sub('Tufts_GB07.2.J.DO.', '', colnames(extra))
+rownames(extra) = extra$Marker
+colnames(extra)[1:3] = c('marker', 'chr', 'pos')
+
+extra = extra %>%
+          select(-chr, -pos) %>%
+          gather(sample, call, -marker) %>%
+          mutate(sample = str_c('g3_', sample))
+```
+
+Merge the samples. There will be some duplicates, but I want to see how they turn out. I added 'g1', 'g2' & 'g3' to each of the groups.
+
+```{r}
+g_tmp =  geno %>%
+          as.data.frame() %>%
+          select(-chr, -pos, -cM, -A1, -A2) %>%
+          gather(sample, call, -marker) %>%
+          mutate(sample = str_c('g1_', sample))
+
+g = full_join(g_tmp, geno2)
+g = full_join(g, extra)
+g = g %>%
+      spread(sample, call)
+```
+
+Check whether we have ~143000 rows.
+
+```{r}
+dim(g)
+```
+
+Filter genotypes based on no-call rate of 10%.
+
+```{r}
+rownames(g) = g$marker
+g = as.matrix(g[,-1])
+call_rate = colMeans(g == 'N', na.rm = TRUE)
+outliers = call_rate[call_rate > 0.1]
+outliers = data.frame(sample = names(outliers), call_rate = outliers)
+kable(outliers)
+write.csv(outliers, file = file.path(base_dir, 'results', 'genotype_outliers.csv'))
+g = g[,call_rate <= 0.1]
+```
+
+Select UNC tier 1 & 2 markers and ones in Karl's marker set.
+
+```{r select_markers}
+snps = snps[snps$tier <= 2,]
+markers = markers[markers$marker %in% snps$marker,]
+marker_set = intersect(rownames(g), markers$marker)
+markers = markers[markers$marker %in% marker_set,]
+g = g[markers$marker,]
+```
+
+Fix some of the sample IDs.
+
+```{r fix_sample_ids}
+colnames(g) = sub('3_2$',  '23', colnames(g))
+colnames(g) = sub('32_2$', '33', colnames(g))
+colnames(g) = sub('78_2$', '79', colnames(g))
+```
+
+Save the genotypes.
+
+```{r save_geno}
+saveRDS(g, file = paste0(geno_dir, 'genotypes.rds'))
+rm(geno)
+gc()
+```
+
+Save the sample sex.
+
+```{r save_sex}
+# All of the samples are female.
+sex = data.frame(id = colnames(g),
+                 sex = 'F')
+
+write.csv(sex, file = paste0(hap_dir, "qtl2/sex.csv"), quote = FALSE, row.names = FALSE)
+```
+
+Gather the founder and sample genotypes and convert them to qtl2 format.
+
+```{r get_geno_calls}
+load(paste0(muga_dir, "GM_geno.Rdata"))
+load(paste0(muga_dir, "GM_code.Rdata"))
+load(paste0(muga_dir, "GM_sex.Rdata"))
+
+# Fix B6 markers.
+b6 = grep('^B6', rownames(GM_geno))
+rownames(GM_geno)[b6] = gsub('\\.', '-', rownames(GM_geno)[b6])
+
+# Reorder to match the current SNPs.
+GM_geno = GM_geno[rownames(markers),]
+stopifnot(rownames(GM_geno) == rownames(markers))
+
+stopifnot(rownames(GM_geno) == rownames(markers))
+stopifnot(rownames(g) == rownames(markers))
+```
+
+
+```{r get_consensus_calls}
+# Keep only the founders.
+founder_codes = paste0(LETTERS[1:8], LETTERS[1:8])
+keep = which(GM_code %in% founder_codes)
+GM_geno = GM_geno[,keep]
+GM_code = GM_code[keep]
+GM_sex  = GM_sex[keep]
+GM_geno[is.na(GM_geno)] = 'N'
+
+ug = qtl2convert::find_unique_geno(GM_geno)
+sum(is.na(ug[,1]))
+
+fgeno = matrix("", nrow = nrow(GM_geno), ncol = length(founder_codes), dimnames = list(rownames(GM_geno), founder_codes))
+
+for(i in founder_codes) {
+  
+  fgeno[,i] = qtl2convert::find_consensus_geno(GM_geno[,GM_code == i])
+  
+} # for(i)
+
+colnames(fgeno) = substring(colnames(fgeno), 1, 1)
+```
+
+```{r encode_genotypes}
+# This has the undesired side-effect of sorting the rownames.
+comb_geno = merge(fgeno, g, by = "row.names", sort = FALSE)
+rownames(comb_geno) = comb_geno[,1]
+comb_geno = as.matrix(comb_geno[,-1])
+comb_geno = comb_geno[rownames(markers),]
+
+new_geno = comb_geno
+
+ug = apply(comb_geno, 1, table)
+
+for(i in 1:nrow(comb_geno)) {
+  
+  # N
+  wh = which(comb_geno[i,] == "N")
+  new_geno[i, wh] = "-"
+  
+  ug[[i]] = ug[[i]][!names(ug[[i]]) %in% c("H", "N")]
+  stopifnot(length(ug[[i]]) < 3)
+  
+  # Allele A
+  if(length(ug[[i]]) > 0) {
+    wh = which(comb_geno[i,] == names(ug[[i]])[1])
+    new_geno[i, wh] = "A"
+  }
+  
+  # Allele B
+  if(length(ug[[i]]) > 1) {
+    wh = which(comb_geno[i,] == names(ug[[i]])[2])
+    new_geno[i, wh] = "B"
+  }
+  
+} # for(i)
+
+# Write founders.
+tmp = data.frame(marker = rownames(new_geno), new_geno[,1:8])
+write.csv(tmp, file = paste0(hap_dir, "qtl2/founder_geno.csv"), quote = FALSE, row.names = FALSE)
+
+# Write founders.
+tmp = data.frame(marker = rownames(new_geno), new_geno[,-(1:8)])
+colnames(tmp) = sub('^X', '', colnames(tmp))
+write.csv(tmp, file = paste0(hap_dir, "qtl2/sample_geno.csv"), quote = FALSE, row.names = FALSE)
+rm(tmp)
+```
+
+```{r gmap_pmap}
+# Write out genetic and physical maps.
+tmp = markers[,c("marker", "chr", "cM")]
+colnames(tmp)[3] = "pos"
+write.csv(tmp, file = paste0(hap_dir, "qtl2/gmap.csv"), quote = FALSE, row.names = FALSE)
+rm(tmp)
+
+tmp = markers[,c("marker", "chr", "pos")]
+tmp$pos = tmp$pos * 1e-6
+write.csv(tmp, file = paste0(hap_dir, "qtl2/pmap.csv"), quote = FALSE, row.names = FALSE)
+rm(tmp)
+```
+
+```{r make_pheno_covar}
+pheno = readr::read_csv(str_c(base_dir, 'data/phenotypes/tufts_do_tb_pheno_cleaned.csv'))
+pheno = data.frame(pheno)
+rownames(pheno) = pheno$mouse
+pheno$gen = as.numeric(sub("^G", "", pheno$gen))
+colnames(pheno)[1] = 'id'
+
+# Map the genotype samples to the phenotype samples.
+samples = strsplit(colnames(g), '_')
+samples = sapply(samples, function(z) { z[length(z)] })
+samples = sub('\\.[0-9]$', '', samples)
+samples = parse_number(samples)
+samples = data.frame(id = colnames(g), sample = samples)
+
+covar = data.frame(id = samples$id,
+                   sample = samples$sample,
+                   sex = 'F',
+                   gen = 1)
+m = match(covar$sample, pheno$id)
+m_wh = which(!is.na(m))
+covar$gen[m_wh] = pheno$gen[m[m_wh]]
+covar$gen[covar$sample %in% 249:253] = 21
+covar$gen[covar$sample %in% c(332, 333, 375, 404)] = 22
+covar$gen[covar$sample >= 504] = 23
+
+pheno = data.frame(id = samples$id, junk = runif(nrow(samples)))
+
+write.csv(pheno, file = paste0(hap_dir, "qtl2/pheno.csv"), quote = FALSE, row.names = FALSE)
+write.csv(covar, file = paste0(hap_dir, "qtl2/covar.csv"), quote = TRUE,  row.names = FALSE)
+```
+
+```{r cleanup}
+rm(pheno, comb_geno, covar, fgeno, g, GM_geno, markers, new_geno, sex, ug)
+gc()
+```
+
+################################################
+# START HERE ONCE ABOVE HAS BEEN RUN.
+################################################
+
+```{r load_libs}
+options(stringsAsFactors = FALSE)
+knitr::opts_chunk$set(echo = FALSE)
+library(knitr)
+library(argyle)
+library(tidyverse)
+library(qtl2)
+library(qtl2convert)
+
+base_dir = "/media/dmgatti/hdb/projects/TB/"
+geno_dir = paste0(base_dir, "data/genotypes/")
+hap_dir = paste0(base_dir, "haplo_reconstr/")
+gigamuga_url = 'https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/gm_uwisc_v1.csv'
+muga_dir = '/media/dmgatti/hda/data/MUGA/'
+```
+
+Read in the DO cross.
+
+```{r read_cross}
+cross = qtl2::read_cross2(file = paste0(hap_dir, "qtl2/tufts.json"), quiet = FALSE)
+```
+
+```{r estimate_haplotype_probs}
+# Run haplotype reconstruction.
+probs = qtl2:::calc_genoprob2(cross = cross, quiet = FALSE, cores = 2)
+saveRDS(probs, file = paste0(hap_dir, "tufts_do_genoprobs.rds"))
+
+gc()
+
+# Convert ot allele probs.
+aprobs = genoprob_to_alleleprob(probs = probs, quiet = FALSE)
+saveRDS(aprobs, file = paste0(hap_dir, "tufts_do_alleleprobs.rds"))
+
+rm(probs)
+gc()
+```

@@ -1,0 +1,152 @@
+---
+title: 'Tufts DO TB: Gather qtl2 data'
+author: "Daniel Gatti"
+date: "February 22, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(readxl)
+library(tidyverse)
+library(qtl2)
+library(qtl2convert)
+
+base_dir = '/media/dmgatti/hdb/projects/TB'
+pheno_file  = file.path(base_dir, 'data', 'phenotypes', 'tufts_do_tb_pheno_cleaned.csv')
+fda_pheno_file = '/media/dmgatti/hdb/projects/USFDA/data/phenotypes/fda_pheno_cleaned.csv'
+image_file  = file.path(base_dir, 'data', 'image_measurements.xlsx')
+probs_file  = file.path(base_dir, 'haplo_reconstr', 'tufts_do_alleleprobs_cleaned.rds')
+fda_probs_file = '/media/dmgatti/hdb/projects/USFDA/haplo_reconstr/haps/fda_do_alleleprobs_qc_filtered.rds'
+marker_file = file.path(base_dir, 'haplo_reconstr', 'qtl2', 'pmap.csv')
+output_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata')
+```
+
+Load in phenotypes, genoprobs & markers. Markers are from U. Wisc. coordinates.
+
+```{r read_data}
+pheno     = readr::read_csv(pheno_file)
+fda_pheno = readr::read_csv(fda_pheno_file)
+img_data  = read_xlsx(path = image_file)
+colnames(img_data) = c('mouse', 'prSS', 'necr')
+probs     = readRDS(probs_file)
+fda_probs = readRDS(fda_probs_file)
+markers   = readr::read_csv(marker_file, col_types = 'ccn')
+```
+
+Align samples between pheno and probs.
+
+```{r align_samples}
+# Keep only DO mice dosed with TB.
+pheno = filter(pheno, strain == 'J:DO' & mtb_dose > 0)
+
+pheno = full_join(pheno, img_data)
+
+# Align samples between phenotypes and probs.
+samples = intersect(pheno$mouse, rownames(probs[[1]]))
+pheno = as.data.frame(pheno)
+pheno$mouse = as.character(pheno$mouse)
+rownames(pheno) = pheno$mouse
+pheno = pheno[samples,]
+probs = probs[samples,]
+
+stopifnot(all(nrow(pheno) == nrow(probs[[1]])))
+stopifnot(all(rownames(pheno) == rownames(probs[[1]])))
+```
+
+There are `r nrow(pheno)` samples in common between the phenotypes and genoprobs.
+
+Combine the FDA mouse number, dose and survival data for non-vaccinted mice with the Tufts data.
+
+```{r merge_fda_tufts}
+fda_pheno = fda_pheno %>%
+              filter(vacc == 'N') %>%
+              select(mouse = sample, gen, sex, vacc, dose, survival, cause, lung_mtb)
+fda_pheno = as.data.frame(fda_pheno)
+rownames(fda_pheno) = fda_pheno$mouse
+common = intersect(fda_pheno$mouse, rownames(fda_probs[[1]]))
+
+fda_pheno = fda_pheno[common,]
+fda_probs = fda_probs[common,]
+
+pheno = full_join(pheno, fda_pheno)
+names(fda_probs) = sub('^chr', '', fda_probs)
+probs = rbind(probs, fda_probs)
+```
+
+
+Separate phenotypes from covariates.
+
+```{r make_pheno_covar}
+covar = select(pheno, mouse:euth)
+rownames(covar) = covar$mouse
+pheno = select(pheno, mouse, pct_wt_loss:resistin, necr)
+```
+
+RankZ transform the phenotypes.
+
+```{r log_rankz_pheno}
+rankZ = function(x) {
+  qnorm((rank(x, na.last = 'keep') - 0.5 ) / sum(!is.na(x)))
+} # rankZ()
+
+rownames(pheno) = pheno$mouse
+pheno = as.matrix(pheno[,-1])
+pheno = apply(pheno, 2, rankZ)
+```
+
+Turn covariates into factors. I'm not sure about Mtb_dose yet. Last time, adding it as a factor was better than adding it as a numeric covariate.
+
+```{r covar_factor}
+covar$gen  = factor(covar$gen)
+covar$expr = factor(covar$expr)
+covar$cage = factor(covar$cage)
+covar$aero_run = factor(covar$aero_run)
+covar$euth = factor(covar$euth)
+```
+
+Align markers between markers and probs.
+
+```{r align_markers}
+markers = as.data.frame(markers)
+rownames(markers) = markers$marker
+map = qtl2convert::map_df_to_list(markers, pos_column = 'pos')
+
+unique_chr = names(probs)
+
+for(chr in unique_chr) {
+  
+  mkr = intersect(names(map[[chr]]), dimnames(probs[[chr]])[[3]])
+
+  map[[chr]]  = map[[chr]][mkr]
+  probs[[chr]] = probs[[chr]][,,mkr]
+  stopifnot(all(names(map[[chr]]) == dimnames(probs[[chr]])[[3]]))
+
+} # for(chr)
+```
+
+Create kinship matrices.
+
+```{r make_kinship}
+K = calc_kinship(probs, type = 'loco', cores = 4)
+```
+
+Save large Rdata file.
+
+```{r save_data}
+save(pheno, covar, map, probs, K, file = output_file)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

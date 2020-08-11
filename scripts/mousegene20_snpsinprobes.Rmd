@@ -1,0 +1,79 @@
+---
+title: "MoGene 2.0 SNPs in Probes"
+author: "Daniel Gatti"
+date: "July 21, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactos = FALSE)
+library(mogene20stmmentrezgprobe)
+library(mogene20stmmentrezg.db)
+library(Biostrings)
+library(VariantAnnotation)
+
+affy_dir        = '/media/dmgatti/hda/data/affymetrix'
+affy_probe_file = file.path(affy_dir, 'MoGene-2_0-st-v1.mm10.probe.tab')
+ensembl_dir     = '/media/dmgatti/hda/data/ensembl/rel78/cdna'
+sanger_dir      = '/media/dmgatti/hda/data/Sanger/REL-1807-SNPs_Indels'
+sanger_file     = file.path(sanger_dir, 'mgp.v6.merged.norm.snp.indels.sfiltered.vcf.gz')
+```
+
+**Genome and ensembl builds**
+
+Sanger says that the mouse annotation uses Ensembl 78 and GRCm38. See <ftp://ftp-mouse.sanger.ac.uk/current_snps/README>. Sanger chromosome IDs are formatted without the 'chr' before the number.
+
+Read in the probe sequences.
+
+```{r read_probes_seq}
+probes = read.delim(affy_probe_file)
+```
+
+Nubmer of probes and columns.
+
+```{r probes_file_dim}
+dim(probes)
+```
+
+Column names.
+
+```{r probes_file_dim}
+colnames(probes)
+```
+
+```{r}
+# vcf_file: Full path to Sanger SNP VCF file.
+# chr: chromosome name.
+# start: integer that is the start of region in bp.
+# end:  integer that is the end of region in bp.
+get_snps = function(vcf_file, chr, start, end) {
+
+  param = VariantAnnotation::ScanVcfParam(info = c('INDEL', 'CSQ'),
+                                          geno = c('GT', 'PL', 'DP', 'SP', 'AD', 'ADF', 'ADR', 'GQ', 'FT'),
+                                          samples = c('A_J', '129S1_SvImJ', 'NOD_ShiLtJ', 'NZO_HlLtJ', 'CAST_EiJ', 'PWK_PhJ', 'WSB_EiJ'),
+                                          which = GRanges(seqnames = chr, ranges = IRanges(start, end)))
+  snps = VariantAnnotation::readVcf(file = vcf_file, param = param)
+  
+  if(length(snps) > 0) {
+    # TBD: Decide what to return here.
+    stop('!!!')
+  } else {
+    return(NULL)
+  }
+    
+} # get_snps()
+
+for(i in 1:nrow(probes)) {
+  get_snps(sanger_file, probes$seqname[i], probes$start[i], probes$stop[i])
+}
+
+i=9
+vcf_file = sanger_file; chr = probes$seqname[i]; start = probes$start[i]; end = probes$stop[i]
+```
+
+
+```{r}
+hdr = VariantAnnotation::scanVcfHeader(sanger_file)
+```
+

@@ -1,0 +1,145 @@
+---
+title: "Tufts TB PCA QTL"
+author: "Daniel Gatti"
+date: "July 25, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(qtl2)
+library(pcaMethods)
+library(corrplot)
+
+base_dir = "/media/dmgatti/hdb/projects/TB/"
+result_dir = str_c(base_dir, "results/qtl2/dose_as_factor/")
+
+load(file = str_c(base_dir, "data/phenotypes/GB_Tufts_qtl2_input.Rdata"))
+# CC SNP and gene database files (from Karl).
+ccsnpdb = "/media/dmgatti/hda/data/MUGA/cc_variants.sqlite"
+mgidb   = "/media/dmgatti/hda/data/MUGA/mouse_genes_mgi.sqlite"
+snp_func  = create_variant_query_func(dbfile = ccsnpdb)
+gene_func = create_gene_query_func(dbfile = mgidb)
+ensembl = 93
+
+peaks = NULL
+```
+
+Scale all of the phenotypes.
+
+```{r scale_pheno}
+pheno_scaled = as.matrix(pheno[,8:ncol(pheno)])
+for(i in 1:ncol(pheno_scaled)) {
+  pheno_scaled[,i] = scale(log1p(pheno_scaled[,i]))
+} # for(i)
+```
+
+Get PCs.
+
+```{r pca}
+pc_object = pca(pheno_scaled, nPcs = 10, method = "ppca")
+pheno_pc = scores(pc_object)
+```
+
+Look at the correlation of each PC with the phenotypes.
+
+```{r pc_pheno_cor}
+corrplot(corr = cor(pheno_pc, pheno_scaled, use = "pairwise"), method = "ellipse")
+```
+
+
+Perform QTL mapping on PCs.
+
+```{r pca_qtl}
+for(i in 1:ncol(pheno_pc)) {
+  
+  pheno_name = colnames(pheno_pc)[i]
+  
+  samples2use = which(!is.na(pheno_pc)[,pheno_name])
+  
+  print(str_c(pheno_name, " : ", length(samples2use)))
+  
+  tmpK = K
+  for(j in 1:length(K)) {
+    tmpK[[j]] = K[[j]][samples2use, samples2use]
+  }
+  tmp_covar = covar[samples2use,,drop = FALSE]
+  tmp_covar = tmp_covar[,colSums(tmp_covar) > 0, drop = FALSE]
+
+  print("    QTL")  
+  lod = qtl2::scan1(genoprobs = probs[samples2use,], 
+                    pheno     = pheno_pc[samples2use, pheno_name, drop = FALSE], 
+                    kinship   = tmpK, 
+                    addcovar  = tmp_covar, 
+                    cores = 10)
+  
+  png(str_c(result_dir, pheno_name, "_qtl.png"), width = 1000, height = 800, res = 128)
+  qtl2::plot_scan1(lod, map = map, main = pheno_name)
+  dev.off()
+  
+  current_peaks = find_peaks(lod, map, threshold = 6, prob = 0.95)
+  
+  # If the confidence interval takes up more than 20 Mb, use the peak LOD +/- 5 Mb.
+  if(nrow(current_peaks) > 0) {
+    for(j in 1:nrow(current_peaks)) {
+      if(current_peaks$ci_hi[j] - current_peaks$ci_lo[j]) {
+        current_peaks$ci_hi[j] = current_peaks$pos[j] + 5
+        current_peaks$ci_lo[j] = max(current_peaks$pos[j] - 5, 3)  # This protects us from going off the beginning of the chr.
+      } # if(current_peaks$ci_hi[j] - current_peaks$ci_lo[j])
+    } # for(j)
+    
+    peaks = rbind(peaks, current_peaks)
+    
+    coefs = vector("list", nrow(current_peaks))
+    names(coefs) = current_peaks$chr
+    assocs = vector("list", nrow(current_peaks))
+    names(assocs) = current_peaks$chr
+  
+    for(j in 1:nrow(current_peaks)) {
+    
+      curr_chr = current_peaks$chr[j]
+      print(str_c("    chr ", curr_chr))
+      start = current_peaks$ci_lo[j]
+      end   = current_peaks$ci_hi[j]
+  
+      print(paste("    coef", j))
+      coefs[[j]] = qtl2::scan1blup(genoprobs = probs[samples2use, curr_chr], 
+                              pheno     = pheno_pc[samples2use, pheno_name, drop = FALSE], 
+                              kinship   = K[[curr_chr]], 
+                              addcovar  = tmp_covar,
+                              se = TRUE,
+                              cores = 10)
+      stopifnot(!is.nan(coefs[[j]]))
+    
+      png(str_c(result_dir, pheno_name, "_coef_chr", curr_chr, ".png"), width = 1000, height = 800, res = 128)
+      plot_coefCC(coefs[[j]], map, scan1_output = lod, top_panel_prop = 0.6, main = pheno_name)
+      dev.off()
+    
+      print(paste("    assoc", j))
+      assocs[[j]] = scan1snps(genoprobs = probs[,curr_chr], pheno = pheno_pc[,pheno_name, drop = FALSE], kinship = tmpK[[curr_chr]], addcovar = tmp_covar,
+                              map = map, chr = curr_chr, start = start - 1, end = end + 1, query_func = snp_func, 
+                              keep_all_snps = TRUE, cores = 10)
+      
+      
+    
+      genes = gene_func(chr = curr_chr, start = start - 1, end = end + 1)
+      png(str_c(result_dir, pheno_name, "_assoc_chr", curr_chr, ".png"), width = 2400, height = 1600, res = 300)
+      plot_snpasso(scan1output = assocs[[j]]$lod, snpinfo = assocs[[j]]$snpinfo, genes = genes, drop_hilit = 1, top_panel_prop = 0.5, main = pheno_name)
+      dev.off()
+    
+      # Get the top SNPs.
+      top = top_snps(assocs[[j]]$lod, assocs[[j]]$snpinfo)
+      write_csv(top, path = str_c(result_dir, pheno_name, "_assoc_chr", curr_chr, "_top_snps.csv"))
+
+    } # if(nrow(current_peaks > 0))
+    
+  } # for(j)
+  
+  save(lod, coefs, assocs, file = str_c(result_dir, pheno_name, "_qtl2.Rdata"))
+  
+} # for(i)
+
+write_csv(peaks, path = str_c(result_dir, "tb_qtl_peaks_pca.csv"))
+```
+

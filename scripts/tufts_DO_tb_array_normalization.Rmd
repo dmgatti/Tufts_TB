@@ -1,0 +1,292 @@
+---
+title: "Tufts Affy Array Data"
+author: "Daniel Gatti"
+date: "July 7, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+
+#General Bioconductor packages
+    library(Biobase)
+    library(oligoClasses)
+     
+#Annotation and data import packages
+    library(ArrayExpress)
+    library(pd.mogene.2.0.st)
+    library(mogene20sttranscriptcluster.db)
+     
+#Quality control and pre-processing packages
+    library(oligo)
+    library(arrayQualityMetrics)
+     
+#Analysis and statistics packages
+    library(limma)
+    library(topGO)
+    library(ReactomePA)
+    library(clusterProfiler)
+    library(pcaMethods)
+     
+#Plotting and color options packages
+    library(gplots)
+    library(ggplot2)
+    library(geneplotter)
+    library(RColorBrewer)
+    library(pheatmap)
+     
+#Formatting/documentation packages
+    library(rmarkdown)
+    library(dplyr)
+    library(tidyr)
+
+#Helpers:
+    library(stringr)
+    library(matrixStats)
+    library(genefilter)
+    library(openxlsx)
+    library(devtools)
+
+base_dir   = '/media/dmgatti/hdb/projects/TB'
+cel_dir    = file.path(base_dir, 'data', 'expression', 'cel_files', 'analysis', 'raw')
+report_dir = file.path(base_dir, 'data', 'expression', 'cel_files', 'analysis', 'report')
+sdrf_file  = file.path(cel_dir, 'tufts_do_tb_sdrf.tsv')
+```
+
+```{r read_cel_files}
+SDRF = read.delim(sdrf_file)
+rownames(SDRF) = SDRF$Array.Data.File
+SDRF = AnnotatedDataFrame(SDRF)
+
+raw_data = oligo::read.celfiles(filenames = file.path(cel_dir, SDRF$Array.Data.File),
+                                verbose = FALSE, phenoData = SDRF)
+stopifnot(validObject(raw_data))
+```
+
+
+```{r pca_raw}
+exp_raw = log2(Biobase::exprs(raw_data))
+PCA_raw = prcomp(t(exp_raw), scale. = TRUE)
+
+tmp = data.frame(PC1 = PCA_raw$x[,1], PC2 = PCA_raw$x[,2], PC3 = PCA_raw$x[,3], 
+                 batch = as.character(pData(raw_data)$Factor.Value.batch),
+                 expt = pData(raw_data)$Factor.Value.expt,
+                 dose = as.factor(pData(raw_data)$Factor.Value.dose))
+
+ggplot(tmp, aes(PC1, PC2, color = batch)) +
+  geom_point(size = 2)
+
+ggplot(tmp, aes(PC2, PC3, color = batch)) +
+  geom_point(size = 2)
+# Array batch shows up in PC3.
+```
+
+```{r pca_raw_dose}
+ggplot(tmp, aes(PC2, PC3, color = dose)) +
+  geom_point(size = 2)
+```
+
+
+```{r qaqc}
+oligo::boxplot(raw_data, target = "core", 
+               main = "Boxplot of log2-intensitites for the raw data")
+
+arrayQualityMetrics(expressionset = raw_data,
+                    outdir = report_dir,
+                    force = TRUE, do.logtransform = TRUE,
+                    intgroup = c("Factor.Value.batch", "Factor.Value.dose"))
+```
+
+
+```{r rma}
+# RMA
+rma_eset = oligo::rma(raw_data, target = "core", normalize = FALSE)
+```
+
+```{r rle}
+# RLE
+row_medians_assayData = Biobase::rowMedians(as.matrix(Biobase::exprs(rma_eset)))
+
+RLE_data = sweep(Biobase::exprs(rma_eset), 1, row_medians_assayData)
+
+RLE_data = as.data.frame(RLE_data)
+RLE_data_gathered = tidyr::gather(RLE_data, array, log2_expression_deviation)
+
+ggplot(RLE_data_gathered, aes(array, log2_expression_deviation)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  ylim(c(-3, 3)) + 
+  theme(axis.text.x = element_text(colour = "aquamarine4", 
+                                   angle = 60, size = 6.5, hjust = 1 ,
+                                   face = "bold"))
+```
+
+I'm not removing any arrays for now. The low expression ones could be the tail of the distribution.
+
+```{r rma_core}
+# RMA
+rma_eset = oligo::rma(raw_data, target = "core")
+```
+
+```{r pca_rma_core}
+expr = Biobase::exprs(rma_eset)
+PCA  = prcomp(t(expr), scale = TRUE)
+
+percentVar = round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+sd_ratio   = sqrt(percentVar[2] / percentVar[1])
+
+dataGG = data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2], PC3 = PCA$x[,3],
+                    batch = factor(Biobase::pData(rma_eset)$Factor.Value.batch),
+                    dose  = factor(Biobase::pData(rma_eset)$Factor.Value.dose))
+
+ggplot(dataGG, aes(PC1, PC2)) +
+      geom_point(aes(shape = batch, colour = dose)) +
+  ggtitle("PCA plot of the calibrated, summarized data") +
+  xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) +
+  ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_shape_manual(values = c(4,15)) + 
+  scale_color_manual(values = c("darkorange2", "dodgerblue4", 'plum4'))
+```
+
+```{r}
+ggplot(dataGG, aes(PC2, PC3)) +
+      geom_point(aes(shape = batch, colour = dose)) +
+  ggtitle("PCA plot of the calibrated, summarized data") +
+  xlab(paste0("PC2, VarExp: ", percentVar[2], "%")) +
+  ylab(paste0("PC3, VarExp: ", percentVar[3], "%")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_shape_manual(values = c(4,15)) + 
+  scale_color_manual(values = c("darkorange2", "dodgerblue4", 'plum4'))
+```
+
+
+```{r rma_heatmap,fig.width=12,fig.height=12}
+# Heatmap
+expr = exprs(rma_eset)
+
+dists = as.matrix(dist(t(expr), method = "manhattan"))
+
+rownames(dists) <- row.names(pData(rma_eset))
+hmcol <- rev(colorRampPalette(RColorBrewer::brewer.pal(9, "YlOrRd"))(255))
+colnames(dists) <- NULL
+diag(dists) <- NA
+
+annotation_for_heatmap = data.frame(batch = pData(rma_eset)$Factor.Value.batch,  
+                                    dose  = pData(rma_eset)$Factor.Value.dose)
+
+row.names(annotation_for_heatmap) <- row.names(pData(rma_eset))
+
+ann_colors <- list(
+  batch = c('2017' = "chartreuse4", '2019' = "burlywood3"),
+  dose  = c('0' = "blue4", '16' = "cadetblue2", '28' = 'royalblue')
+)
+
+pheatmap(dists, col = (hmcol), 
+         annotation_row = annotation_for_heatmap,
+         annotation_colors = ann_colors,
+         legend = TRUE, 
+         treeheight_row = 0,
+         legend_breaks = c(min(dists, na.rm = TRUE), 
+                           max(dists, na.rm = TRUE)), 
+         legend_labels = (c("small distance", "large distance")),
+         main = "Clustering heatmap for the calibrated samples")
+```
+
+Samples 307 & 313 are further from the other samples. Still leaving them in for now.
+
+```{r filtering}
+expr_medians = rowMedians(Biobase::exprs(rma_eset))
+
+hist_res = hist(expr_medians, 100, col = "cornsilk1", freq = FALSE, 
+            main = "Histogram of the median intensities", 
+            border = "antiquewhite4",
+            xlab = "Median intensities")
+```
+
+I'm keeping all genes becuase I will perform ComBat batch normalization next.
+
+```{r write_expr}
+write.csv(Biobase::exprs(rma_eset), file = file.path(base_dir, 'data', 'expression', 'do_tb_expr_rma.csv'),
+          quote = F)
+```
+
+Combat batch normalization.
+
+```{r combat}
+mod   = model.matrix(~Factor.Value.dose, data = pData(rma_eset))
+batch = as.character(pData(rma_eset)$Factor.Value.batch)
+expr_cb = sva::ComBat(dat = exprs(rma_eset), batch = batch, mod = mod)
+```
+
+Check PCA after ComBat.
+
+```{r pca_post_combat}
+PCA  = prcomp(t(expr_cb), scale = TRUE)
+
+percentVar = round(100*PCA$sdev^2 / sum(PCA$sdev^2),1)
+sd_ratio   = sqrt(percentVar[2] / percentVar[1])
+
+dataGG = data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2], PC3 = PCA$x[,3],
+                    batch = factor(Biobase::pData(rma_eset)$Factor.Value.batch),
+                    dose  = factor(Biobase::pData(rma_eset)$Factor.Value.dose))
+
+ggplot(dataGG, aes(PC1, PC2)) +
+      geom_point(aes(shape = batch, colour = dose)) +
+  ggtitle("PCA plot of the calibrated, summarized data") +
+  xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) +
+  ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_shape_manual(values = c(4,15)) + 
+  scale_color_manual(values = c("darkorange2", "dodgerblue4", 'plum4'))
+```
+
+```{r pca_post_combat_pc23}
+ggplot(dataGG, aes(PC2, PC3)) +
+      geom_point(aes(shape = batch, colour = dose)) +
+  ggtitle("PCA plot of the calibrated, summarized data") +
+  xlab(paste0("PC2, VarExp: ", percentVar[2], "%")) +
+  ylab(paste0("PC3, VarExp: ", percentVar[3], "%")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_shape_manual(values = c(4,15)) + 
+  scale_color_manual(values = c("darkorange2", "dodgerblue4", 'plum4'))
+```
+
+Add combat expression back to eset.
+
+```{r write_expr_cb}
+write.csv(expr_cb, file = file.path(base_dir, 'data', 'expression', 'do_tb_expr_rma_combat.csv'),
+          quote = F)
+exprs(rma_eset) = expr_cb
+```
+
+Add transcript cluster mappings.
+
+```{r add_transcr_cl}
+annot = AnnotationDbi::select(mogene20sttranscriptcluster.db,
+                              keys = featureNames(rma_eset),
+                              columns = c('ENSEMBL', 'ENTREZID', 'SYMBOL', 'GENENAME'),
+                              keytype = 'PROBEID')
+# Remove transcripts with no Ensembl mapping (??)
+annot = subset(annot, !is.na(ENSEMBL))
+```
+
+Keep probesets that only map to one gene (for now).
+
+```{r}
+annot_keep = dplyr::count(annot, PROBEID) %>%
+              filter(n == 1)
+annot = subset(annot, PROBEID %in% pull(annot_dupl, PROBEID))
+
+rma_eset = subset(rma_eset, featureNames(rma_eset) %in% pull(annot, PROBEID))
+
+fData(rma_eset)$PROBEID = rownames(fData(rma_eset))
+fData(rma_eset) = left_join(fData(rma_eset), annot)
+```
+
+```{r}
+saveRDS(rma_eset, file = file.path(base_dir, 'data', 'expression', 'do_tb_expr_rma_combat_eset.rds'))
+```
+
+
+

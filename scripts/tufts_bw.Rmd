@@ -1,0 +1,45 @@
+---
+title: "Tufts Body Weights"
+author: "Daniel Gatti"
+date: "October 25, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(tidyverse)
+base_dir = '/media/dmgatti/hdb/projects/TB/'
+```
+
+Read in the body weight data.
+
+```{r}
+data = read_xlsx(str_c(base_dir, 'data/phenotypes/JDO mouse weights 022819.xlsx'), skip = 1)
+data = data %>%
+         rename_all(str_to_lower) %>%
+         rename_all(str_replace_all, ' ', '') %>%
+         rename(mouse = `mouse#`,
+                strain = mousestrain,
+                dose  = mtbinitialdose,
+                class = susceptibilityclass) %>%
+         gather(day, wt, -(mouse:class), convert = TRUE) %>%
+         mutate(mouse = as.character(mouse)) %>%
+         filter(!is.na(wt))
+```
+```{r plot_wt,fig.width=10}
+data %>%
+  filter(strain == 'J:DO') %>%
+  ggplot() +
+    geom_line(aes(day, wt, group = mouse), size = 1, alpha = 0.2) +
+    facet_wrap(~dose) +
+    theme(legend.position = 'none')
+```
+
+```{r}
+data %>%
+  filter(strain == 'J:DO' & dose == 127) %>%
+  ggplot() +
+    geom_line(aes(day, wt, group = mouse))
+```
+

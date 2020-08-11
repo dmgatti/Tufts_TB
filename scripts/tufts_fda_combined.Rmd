@@ -1,0 +1,308 @@
+---
+title: "Lung Mtb Burden"
+author: "Daniel Gatti"
+date: "June 17, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(knitr)
+library(VariantAnnotation)
+library(AnnotationHub)
+library(qtl2)
+tufts_dir = "/media/dmgatti/hdb/projects/TB/"
+fda_dir   = "/media/dmgatti/hda/data/USFDA/"
+ccsnpdb = "/media/dmgatti/hda/data/MUGA/cc_variants.sqlite"
+mgidb   = "/media/dmgatti/hda/data/MUGA/mouse_genes_mgi.sqlite"
+ensembl = 93
+```
+
+```{r load_data, include=FALSE}
+# Tufts
+load(paste0(tufts_dir, "data/phenotypes/GB_Tufts_qtl2_input.Rdata"))
+tufts_pr    = probs
+tufts_pheno = pheno
+tufts_rz    = pheno_rz
+tufts_mkr   = markers
+tufts_map   = map
+tufts_K     = K
+tufts_covar = covar
+
+colnames(tufts_pheno) = base::sub("mtb_burden", "lung_mtb",        colnames(tufts_pheno))
+colnames(tufts_pheno) = base::sub("pct_normal", "pct_normal_lung", colnames(tufts_pheno))
+colnames(tufts_rz) = base::sub("mtb_burden", "lung_mtb",        colnames(tufts_rz))
+colnames(tufts_rz) = base::sub("pct_normal", "pct_normal_lung", colnames(tufts_rz))
+tufts_pheno$sex = rep("F", nrow(tufts_pheno))
+
+rm(probs, pheno, pheno_rz, covar, K, map, markers)
+
+# FDA
+load(paste0(fda_dir, "results/qtl/fda_qtl_wo73.Rdata"))
+fda_pr    = probs
+fda_pheno = pheno
+fda_rz    = pheno_rz
+fda_mkr   = markers
+fda_map   = map
+fda_K     = K
+fda_covar = covar
+
+rm(probs, pheno, pheno_rz, covar, K, map, markers)
+gc()
+```
+
+## Background
+
+Gillian Beamer at Tufts University and Sherry Kurtz of the US FDA sent me data from Diversity Outbred mice that have been dosed with tuberculosis. After data-cleaning, the Tufts data contained `r nrow(tufts_pheno)` mice and the FDA data contained `r nrow(fda_pheno)`. The FDA mice were vaccinated before dosing, but the Tufts mice were not. Both data sets contained Lung M.Tb. Burden (lung_mtb) and % Normal Lung (pct_normallung).  I mapped these two traits in each data set and then in a combined data set. I noticed that both data sets have a QTL for Lung M. Tb. Burden on Chr 5 in roughly the same location.
+
+## Lung M.Tb. Burden
+
+### Tufts Data
+
+I mapped Lung_mtb using experiment and dose as factors.
+
+```{r tufts_lung_mtb_qtl}
+tufts_covar = model.matrix(~dose, data = tufts_pheno)[,-1]
+tufts_lung_mtb = scan1(genoprobs = tufts_pr, pheno = tufts_rz[,"lung_mtb", drop = FALSE], kinship = tufts_K, addcovar = tufts_covar, cores = 10)
+tufts_lung_mtb_peaks = find_peaks(tufts_lung_mtb, map = tufts_map, threshold = 7, prob = 0.95)
+kable(tufts_lung_mtb_peaks, digits = 3)
+```
+
+The table above shows the QTL location (chr and pos), LOD and confidence interval (ci_lo and ci_hi). The center is around 20.4 Mb and the QTL spans from 19.4 Mb to 20.7 Mb.
+
+```{r tufts_lung_mtb_qtl_plot,fig.width=10}
+plot_scan1(tufts_lung_mtb, map = tufts_map, main = "Lung M.Tb. Burden (Tufts)")
+```
+**Figure 1.** Lung M.Tb. Burden in the Tufts data. There is a peak with a LOD of `r tufts_lung_mtb_peaks$lod[1]` on Chr `r tufts_lung_mtb_peaks$chr[1]` at `r tufts_lung_mtb_peaks$pos[1]` Mb.
+
+I zoomed in on Chr 5 and plotted the estimated founder allele effects.
+
+```{r tufts_lung_mtb_effect_chr5,include=FALSE}
+chr   = tufts_lung_mtb_peaks$chr[1]
+start = tufts_lung_mtb_peaks$ci_lo[1]
+end   = tufts_lung_mtb_peaks$ci_hi[1]
+tufts_lung_mtb_eff_5 = scan1blup(genoprobs = tufts_pr[,chr], pheno = tufts_rz[,"lung_mtb", drop = FALSE], kinship = tufts_K[[chr]], addcovar = tufts_covar, cores = 10)
+```
+
+```{r tufts_lung_mtb_effect_chr5_plot,fig.width=10}
+plot_coefCC(tufts_lung_mtb_eff_5, map = tufts_map, scan1_output = tufts_lung_mtb, legend = "bottomright", main = "Lung M.Tb. Burden (Tufts)")
+mtext(side = 1, line = 0.5, at = 10 * 1:15, text = 10 * 1:15)
+```
+**Figure 2.** Founder allele effects on Chr 5 for Lung M.Tb. Burden in the Tufts data. The horizontal axis shows the position in Mb along Chr 5. The top panel shows the founder allele effects along the chromosome and the bottom panel shows the LOD.
+
+The pattern of allele effects at the QTL is complex and there may be more than one variant in this location.
+
+I then imputed the founder SNPs onto the DO genomes and performed association mapping near the Chr 5 QTL.
+
+```{r tufts_lung_mtb_snps_chr5,include=FALSE}
+snp_func = create_variant_query_func(dbfile = ccsnpdb)
+gene_func = create_gene_query_func(dbfile = mgidb)
+tufts_assoc = scan1snps(genoprobs = tufts_pr[,chr], pheno = tufts_rz[,"lung_mtb", drop = FALSE], kinship = tufts_K[[chr]], addcovar = tufts_covar, 
+                        map = tufts_map, chr = chr, start = tufts_lung_mtb_peaks$pos - 1, end = tufts_lung_mtb_peaks$pos + 1, query_func = snp_func, 
+                        keep_all_snps = TRUE, cores = 10)
+```
+
+
+```{r tufts_lung_mtb_snps_chr5_plot,fig.width=10}
+genes = gene_func(chr = chr, start = start - 1, end = end + 1)
+plot_snpasso(scan1output = tufts_assoc$lod, snpinfo = tufts_assoc$snpinfo, genes = genes, drop_hilit = 1, top_panel_prop = 0.5, main = "Lung M.Tb. Burden (FDA)")
+```
+**Figure 3.** Association mapping (at the SNP level) around the Chr 5 Lung M.Tb. peak. The top panel shows the LOD score for each SNP. The bottom panel shows the genes in the region.
+
+### FDA Data
+
+Lung_mtb is mapped using sex and dose as factors and without the 73 RFU dosing group (which was suspected of having lab issues).
+
+```{r fda_lung_mtb_qtl}
+fda_covar = model.matrix(~sex + dose, data = fda_pheno)[,-1]
+fda_lung_mtb = scan1(genoprobs = fda_pr, pheno = fda_rz[,"lung_mtb", drop = FALSE], kinship = fda_K, addcovar = fda_covar, cores = 10)
+fda_lung_mtb_peaks = find_peaks(fda_lung_mtb, map = fda_map, threshold = 7, prob = 0.95)
+kable(fda_lung_mtb_peaks, digits = 3)
+```
+
+The table above shows the QTL location (chr and pos), LOD and confidence interval (ci_lo and ci_hi). The center is around 29.8 Mb, which is about 8 Mb distal from the corresponding Tufts QTL peak.
+
+```{r fda_lung_mtb_qtl_plot,fig.width=10}
+plot_scan1(fda_lung_mtb, map = fda_map, main = "Lung M.Tb. Burden (FDA)")
+```
+**Figure 4.** Lung M.Tb. Burden in the FDA data. There is a peak with a LOD of `r fda_lung_mtb_peaks$lod[1]` on Chr `r fda_lung_mtb_peaks$chr[1]` at `r fda_lung_mtb_peaks$pos[1]` Mb.
+
+I zoomed in on Chr 5 and plotted the estimated founder allele effects.
+
+```{r fda_lung_mtb_effect_chr5,include=FALSE}
+chr   = fda_lung_mtb_peaks$chr[1]
+start = fda_lung_mtb_peaks$ci_lo[1]
+end   = fda_lung_mtb_peaks$ci_hi[1]
+fda_lung_mtb_eff_5 = scan1blup(genoprobs = fda_pr[,chr], pheno = fda_rz[,"lung_mtb", drop = FALSE], kinship = fda_K[[chr]], addcovar = fda_covar, cores = 10)
+```
+
+```{r fda_lung_mtb_effect_chr5_plot,fig.width=10}
+plot_coefCC(fda_lung_mtb_eff_5, map = fda_map, scan1_output = fda_lung_mtb, legend = "bottomright", main = "Lung M.Tb. Burden (FDA)")
+mtext(side = 1, line = 0.5, at = 10 * 1:15, text = 10 * 1:15)
+```
+**Figure 5.** Founder allele effects on Chr 5 for Lung M.Tb. Burden in the FDA data. The horizontal axis shows the position in Mb along Chr 5. The top panel shows the founder allele effects along the chromosome and the bottom panel shows the LOD.
+
+If these two peaks were caused by the same genes, I would expect the founder allele effects to be somewhat similar. At the moment, I don't think that these two peaks are related.
+
+I then imputed the founder SNPs onto the DO genomes and performed association mapping near the Chr 5 QTL.
+
+```{r fda_lung_mtb_snps_chr5,include=FALSE}
+snp_func = create_variant_query_func(dbfile = ccsnpdb)
+gene_func = create_gene_query_func(dbfile = mgidb)
+fda_assoc = scan1snps(genoprobs = fda_pr[,chr], pheno = fda_rz[,"lung_mtb", drop = FALSE], kinship = fda_K[[chr]], addcovar = fda_covar, 
+                      map = fda_map, chr = chr, start = fda_lung_mtb_peaks$pos - 1, end = fda_lung_mtb_peaks$pos + 1, query_func = snp_func, 
+                      keep_all_snps = TRUE, cores = 10)
+```
+
+
+```{r fda_lung_mtb_snps_chr5_plot,fig.width=10}
+genes = gene_func(chr = chr, start = start - 1, end = end + 1)
+plot_snpasso(scan1output = fda_assoc$lod, snpinfo = fda_assoc$snpinfo, genes = genes, drop_hilit = 1, top_panel_prop = 0.5, main = "Lung M.Tb. Burden (FDA)")
+```
+**Figure 6.** Association mapping (at the SNP level) around the Chr 5 Lung M.Tb. peak. The top panel shows the LOD score for each SNP. The bottom panel shows the genes in the region.
+
+[http://www.informatics.jax.org/marker/MGI:96559](Il6) is in the QTL interval and may be of interest.
+
+
+### Combined Data
+
+```{r comb_lung_mtb,include=FALSE}
+new_map = tufts_map
+for(i in 1:length(tufts_pr)) {
+  common_mkr = intersect(dimnames(tufts_pr[[i]])[[3]], dimnames(fda_pr[[i]])[[3]])
+  tufts_pr[[i]] = tufts_pr[[i]][,,common_mkr]
+  fda_pr[[i]]   = fda_pr[[i]][,,common_mkr]
+  new_map[[i]] = new_map[[i]][common_mkr]
+} # for(i)
+
+pr = qtl2:::rbind.calc_genoprob(tufts_pr, fda_pr)
+colnames(tufts_pheno)[1] = "sample"
+pheno = rbind(tufts_pheno[,c("sample", "sex", "expt", "dose", "lung_mtb")], fda_pheno[,c("sample", "sex", "expt", "dose", "lung_mtb")])
+pheno$sex = factor(pheno$sex)
+pheno$expt = factor(pheno$expt)
+pheno$dose = factor(pheno$dose)
+
+rankZ = function(x) {
+  x = rank(x, na.last = "keep", ties.method = "average") / (sum(!is.na(x)) + 1)
+  return(qnorm(x))
+}
+
+pheno$lung_mtb = rankZ(pheno$lung_mtb)
+covar = model.matrix(~sex + expt + dose, data = pheno)[,-1]
+K = calc_kinship(pr, type = "loco", cores = 10)
+```
+
+I combined the two data sets together (`r nrow(pheno)` mice) and mapped Lung M.Tb Burden
+
+```{r comb_lun_mtb_qtl}
+lung_mtb = scan1(genoprobs = pr, pheno = pheno[,"lung_mtb", drop = FALSE], kinship = K, addcovar = covar, cores = 10)
+lung_mtb_peaks = find_peaks(lung_mtb, map = new_map, threshold = 7, prob = 0.95)
+kable(lung_mtb_peaks, digits = 3)
+```
+
+```{r lung_mtb_qtl_plot,fig.width=10,fig.height=8}
+plot_scan1(lung_mtb, map = new_map, main = "Lung M.Tb. Burden (Combined)")
+```
+**Figure 7.** Lung M.Tb. Burden in the combined data. There is a peak with a LOD of `r lung_mtb_peaks$lod[1]` on Chr `r lung_mtb_peaks$chr[1]` at `r lung_mtb_peaks$pos[1]` Mb and one with a LOD of `r lung_mtb_peaks$lod[2]` on Chr `r lung_mtb_peaks$chr[2]` at `r lung_mtb_peaks$pos[2]` Mb.
+
+In the combined data, the Chr 5 peak was smaller. Peaks on chr 10 and 17 were larger.
+
+### Chr 5
+
+```{r lung_mtb_effect_chr5,include=FALSE}
+chr   = 5
+start = 19
+end   = 30
+lung_mtb_eff_5 = scan1blup(genoprobs = pr[,chr], pheno = pheno[,"lung_mtb", drop = FALSE], kinship = K[[chr]], addcovar = covar, cores = 10)
+```
+
+```{r lung_mtb_effect_chr5_plot,fig.width=10,fig.height=8}
+plot_coefCC(lung_mtb_eff_5, map = new_map, scan1_output = lung_mtb, legend = "bottomright", main = "Lung M.Tb. Burden (Combined)")
+mtext(side = 1, line = 0.5, at = 10 * 1:15, text = 10 * 1:15)
+```
+**Figure 8.** Founder allele effects on Chr 5 for Lung M.Tb. Burden in the combined data. The horizontal axis shows the position in Mb along Chr 5. The top panel shows the founder allele effects along the chromosome and the bottom panel shows the LOD. Much of the signal seems to be from the Tufts data.
+
+```{r lung_mtb_snps_chr5,include=FALSE}
+assoc = scan1snps(genoprobs = pr[,chr], pheno = pheno[,"lung_mtb", drop = FALSE], kinship = K[[chr]], addcovar = covar, 
+                      map = new_map, chr = chr, start = fda_lung_mtb_peaks$pos - 1, end = fda_lung_mtb_peaks$pos + 1, query_func = snp_func, 
+                      keep_all_snps = TRUE, cores = 10)
+```
+
+
+```{r lung_mtb_snps_chr5_plot,fig.width=10,fig.height=8}
+genes = gene_func(chr = chr, start = start - 1, end = end + 1)
+plot_snpasso(scan1output = assoc$lod, snpinfo = assoc$snpinfo, genes = genes, drop_hilit = 1, top_panel_prop = 0.5, main = "Lung M.Tb. Burden (Combined)")
+```
+**Figure 9.** Association mapping (at the SNP level) around the Chr 5 Lung M.Tb. peak. The top panel shows the LOD score for each SNP. The bottom panel shows the genes in the region.
+
+### Chr 10
+
+```{r lung_mtb_effect_chr10,include=FALSE}
+chr   = lung_mtb_peaks$chr[1]
+start = lung_mtb_peaks$ci_lo[1]
+end   = lung_mtb_peaks$ci_hi[1]
+lung_mtb_eff_10 = scan1blup(genoprobs = pr[,chr], pheno = pheno[,"lung_mtb", drop = FALSE], kinship = K[[chr]], addcovar = covar, cores = 10)
+```
+
+```{r lung_mtb_effect_chr10_plot,fig.width=10,fig.height=8}
+plot_coefCC(lung_mtb_eff_10, map = new_map, scan1_output = lung_mtb, legend = "bottomright", main = "Lung M.Tb. Burden (Combined)")
+mtext(side = 1, line = 0.5, at = 10 * 1:12, text = 10 * 1:12)
+```
+**Figure 10.** Founder allele effects on Chr 10 for Lung M.Tb. Burden in the combined data. The horizontal axis shows the position in Mb along Chr 10. The top panel shows the founder allele effects along the chromosome and the bottom panel shows the LOD.
+
+```{r lung_mtb_snps_chr10,include=FALSE}
+assoc = scan1snps(genoprobs = pr[,chr], pheno = pheno[,"lung_mtb", drop = FALSE], kinship = K[[chr]], addcovar = covar, 
+                  map = new_map, chr = chr, start = start - 1, end = end + 1, query_func = snp_func, 
+                  keep_all_snps = TRUE, cores = 10)
+```
+
+
+```{r lung_mtb_snps_chr10_plot,fig.width=10,fig.height=8}
+genes = gene_func(chr = chr, start = start - 1, end = end + 1)
+plot_snpasso(scan1output = assoc$lod, snpinfo = assoc$snpinfo, genes = genes, drop_hilit = 1, top_panel_prop = 0.5, main = "Lung M.Tb. Burden (Combined)")
+```
+**Figure 11.** Association mapping (at the SNP level) around the Chr 10 Lung M.Tb. peak. The top panel shows the LOD score for each SNP. The bottom panel shows the genes in the region.
+
+
+### Chr 17
+
+The Chr 17 QTL is near the mouse MHC locus (~36 Mb), but the QTL confidence interval covers a region from 33 to 43 Mb. 
+
+```{r lung_mtb_effect_chr17,include=FALSE}
+chr   = lung_mtb_peaks$chr[2]
+start = lung_mtb_peaks$ci_lo[2]
+end   = lung_mtb_peaks$ci_hi[2]
+lung_mtb_eff_17 = scan1blup(genoprobs = pr[,chr], pheno = pheno[,"lung_mtb", drop = FALSE], kinship = K[[chr]], addcovar = covar, cores = 10)
+```
+
+```{r lung_mtb_effect_chr17_plot,fig.width=10,fig.height=8}
+plot_coefCC(lung_mtb_eff_17, map = new_map, scan1_output = lung_mtb, legend = "bottomright", main = "Lung M.Tb. Burden (Combined)")
+mtext(side = 1, line = 0.5, at = 10 * 1:9, text = 10 * 1:9)
+```
+**Figure 12.** Founder allele effects on Chr 17 for Lung M.Tb. Burden in the combined data. The horizontal axis shows the position in Mb along Chr 17. The top panel shows the founder allele effects along the chromosome and the bottom panel shows the LOD.
+
+
+```{r lung_mtb_snps_chr17,include=FALSE}
+assoc = scan1snps(genoprobs = pr[,chr], pheno = pheno[,"lung_mtb", drop = FALSE], kinship = K[[chr]], addcovar = covar, 
+                  map = new_map, chr = chr, start = start, end = end, query_func = snp_func, 
+                  keep_all_snps = TRUE, cores = 10)
+```
+
+
+```{r lung_mtb_snps_chr17_plot,fig.width=10,fig.height=8}
+genes = gene_func(chr = chr, start = start, end = end)
+plot_snpasso(scan1output = assoc$lod, snpinfo = assoc$snpinfo, genes = genes, drop_hilit = 1, top_panel_prop = 0.5, main = "Lung M.Tb. Burden (Combined)")
+```
+**Figure 13.** Association mapping (at the SNP level) around the Chr 17 Lung M.Tb. peak. The top panel shows the LOD score for each SNP. The bottom panel shows the genes in the region.
+
+I zoomed in on the region with the highest LOD score.
+
+```{r lung_mtb_snps_chr17_zoom,fig.width=10,fig.height=8}
+start = 40
+assoc = scan1snps(genoprobs = pr[,chr], pheno = pheno[,"lung_mtb", drop = FALSE], kinship = K[[chr]], addcovar = covar, 
+                  map = new_map, chr = chr, start = start, end = end, query_func = snp_func, 
+                  keep_all_snps = TRUE, cores = 10)
+genes = gene_func(chr = chr, start = start, end = end)
+plot_snpasso(scan1output = assoc$lod, snpinfo = assoc$snpinfo, genes = genes, drop_hilit = 1, top_panel_prop = 0.5, main = "Lung M.Tb. Burden (Combined)")
+```
+**Figure 14.** Association mapping (at the SNP level) around the Chr 17 Lung M.Tb. peak. The top panel shows the LOD score for each SNP. The bottom panel shows the genes in the region.
