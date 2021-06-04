@@ -1,0 +1,167 @@
+---
+title: "QTL Mapping with new dose values"
+author: "Daniel Gatti"
+date: "11/2/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(broom)
+library(qtl2)
+
+base_dir = '/media/dmgatti/hdb/projects/TB'
+```
+
+Gillian sent me the actual CFU values for each mouse in each batch. I had been using the previously reported values, but would like to try using the median dose.
+
+I was surprised when mapping that using dose as a numeric covariate performed worse (gave lower LOD scores for know positives like s100a8 on chr 3) than using dose (or generation) as a factor. If the calculated doses are off, then maybe this explains that behavior.
+
+Read in the phenotypes and new doses.
+
+```{r read_pheno}
+pheno = readr::read_csv(file.path(base_dir, 'data', 'phenotypes', 'tufts_do_tb_pheno_cleaned.csv'))
+doses = readr::read_csv(file.path(base_dir, 'data', 'phenotypes', 'tufts_tb_batch_doses.csv'))
+```
+
+Look at the distribution of doses.
+
+```{r dist_dose}
+doses = doses %>%
+          pivot_longer(cols = everything(), names_to = 'batch', values_to = 'cfu')
+
+dose_mean = doses %>% 
+              group_by(batch) %>% 
+              summarize(mean_cfu   = mean(cfu, na.rm = TRUE),
+                        median_cfu = median(cfu, na.rm = TRUE))
+
+doses %>%
+  ggplot() +
+    geom_boxplot(aes(batch, cfu)) +
+    geom_point(mapping = aes(batch, mean_cfu), data = dose_mean, color = 'red', size = 2)
+```
+The means and medians are a bit off for the higher groups. I want to see if they are log-normally distributed (by eye).
+
+```{r dist_dose1,fig.height=6}
+doses %>% 
+  ggplot() +
+    geom_histogram(aes(cfu)) +
+    facet_wrap(~batch, ncol = 1)
+```
+
+Maybe we should take the geometric mean on these.
+
+```{r dose_geom_mean}
+doses = doses %>% 
+          mutate(log_cfu = log(cfu))
+dose_mean = dose_mean %>% 
+              full_join(doses %>% 
+                          group_by(batch) %>% 
+                          summarize(geom_cfu = exp(mean(log_cfu, na.rm = TRUE))))
+```
+Plot the old means versus the geometric means.
+
+```{r plot_mean_geom}
+dose_mean %>% 
+  ggplot(aes(mean_cfu, geom_cfu)) +
+    geom_point() +
+    geom_smooth(method = 'lm')+
+    geom_abline(aes(slope = 1, intercept = 0))
+```
+
+Unsurprisingly, the arithmetic means overestimate the CFU values a bit. I'm not sure if this is enough to affect the QTL mapping. 
+
+Get the batch values from the phenotype file. At this point, I don't have values for GB07.7 & 8.
+
+```{r get pheno_dose}
+pheno_cfu = pheno %>% 
+              select(batch = expr, pheno_cfu = mtb_dose) %>% 
+              distinct() %>% 
+              filter(pheno_cfu > 0)
+dose_mean = full_join(dose_mean, pheno_cfu)
+```
+
+Plot the Mtb CFU values from the phenotype file versus the geometric mean.
+
+```{r plot_pheno_mean_geom}
+dose_mean %>% 
+  ggplot(aes(pheno_cfu, geom_cfu)) +
+    geom_point() +
+    geom_smooth(method = 'lm')+
+    geom_abline(aes(slope = 1, intercept = 0))
+```
+
+Plot phenotypes using the new Mtb CFU doses.
+
+```{r pheno_plot}
+# This is the slow way. I couldn't find a stringr equivalent of match().
+pheno %>% 
+  mutate(new_dose = 0,
+         new_dose = if_else(str_detect(expr, dose_mean$batch[1]), dose_mean$geom_cfu[1], new_dose),
+         new_dose = if_else(str_detect(expr, dose_mean$batch[2]), dose_mean$geom_cfu[2], new_dose),
+         new_dose = if_else(str_detect(expr, dose_mean$batch[3]), dose_mean$geom_cfu[3], new_dose),
+         new_dose = if_else(str_detect(expr, dose_mean$batch[4]), dose_mean$geom_cfu[4], new_dose),
+         new_dose = if_else(str_detect(expr, dose_mean$batch[5]), dose_mean$geom_cfu[5], new_dose),
+         new_dose = if_else(str_detect(expr, dose_mean$batch[6]), dose_mean$geom_cfu[6], new_dose),
+         new_dose = if_else(str_detect(expr, dose_mean$batch[7]), dose_mean$geom_cfu[7], new_dose),
+         new_dose = if_else(str_detect(expr, dose_mean$batch[8]), dose_mean$geom_cfu[8], new_dose),
+         new_dose = if_else(str_detect(expr, dose_mean$batch[9]), dose_mean$geom_cfu[9], new_dose), 
+         mouse = as.character(mouse)) %>%  
+  select(mouse, gen, expr, new_dose, pct_wt_loss, cxcl5:s100a8) %>%
+  pivot_longer(cols = pct_wt_loss:s100a8, names_to = 'phenotype', values_to = 'value') %>% 
+  mutate(value = value + 1) %>%
+  ggplot(aes(new_dose, value, group = new_dose)) +
+    geom_boxplot() +
+    scale_y_log10() +
+    facet_wrap(~phenotype)
+```
+
+See if linear models fit better using the original doses or the new doses.
+
+```{r lm_fit_doses}
+lm_orig = pheno %>% 
+            select(mouse, mtb_dose, euth_day, pct_wt_loss:s100a8) %>% 
+            pivot_longer(cols = pct_wt_loss:s100a8, names_to = 'phenotype', values_to = 'value') %>% 
+            group_by(phenotype) %>% 
+            nest() %>% 
+            mutate(mod = map(data, ~ lm(value ~ mtb_dose + euth_day, data = .x)),
+                   summ = map(mod, glance)) %>% 
+            select(phenotype, summ) %>% 
+            unnest(cols = c(summ))
+```
+
+```{r lm_fit_doses2}
+lm_new = pheno %>% 
+           mutate(new_dose = 0,
+                  new_dose = if_else(str_detect(expr, dose_mean$batch[1]), dose_mean$geom_cfu[1], new_dose),
+                  new_dose = if_else(str_detect(expr, dose_mean$batch[2]), dose_mean$geom_cfu[2], new_dose),
+                  new_dose = if_else(str_detect(expr, dose_mean$batch[3]), dose_mean$geom_cfu[3], new_dose),
+                  new_dose = if_else(str_detect(expr, dose_mean$batch[4]), dose_mean$geom_cfu[4], new_dose),
+                  new_dose = if_else(str_detect(expr, dose_mean$batch[5]), dose_mean$geom_cfu[5], new_dose),
+                  new_dose = if_else(str_detect(expr, dose_mean$batch[6]), dose_mean$geom_cfu[6], new_dose),
+                  new_dose = if_else(str_detect(expr, dose_mean$batch[7]), dose_mean$geom_cfu[7], new_dose),
+                  new_dose = if_else(str_detect(expr, dose_mean$batch[8]), dose_mean$geom_cfu[8], new_dose),
+                  new_dose = if_else(str_detect(expr, dose_mean$batch[9]), dose_mean$geom_cfu[9], new_dose), 
+                  mouse = as.character(mouse)) %>% 
+            select(mouse, new_dose, euth_day, pct_wt_loss:s100a8) %>% 
+            pivot_longer(cols = pct_wt_loss:s100a8, names_to = 'phenotype', values_to = 'value') %>% 
+            group_by(phenotype) %>% 
+            nest() %>% 
+            mutate(mod = map(data, ~ lm(value ~ new_dose + euth_day, data = .x)),
+                   summ = map(mod, glance)) %>% 
+            select(phenotype, summ) %>% 
+            unnest(cols = c(summ))
+```
+
+```{r}
+plot(lm_orig$adj.r.squared, lm_new$adj.r.squared)
+abline(0, 1)
+```
+
+The adjusted R-squared is lower when using the new Mtb doses (!!). 
+
+
+
+

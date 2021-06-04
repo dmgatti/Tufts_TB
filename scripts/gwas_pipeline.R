@@ -19,13 +19,14 @@ library(qtl2)
 # pheno: phenotype matrix.
 # kinship: qtl2 style kinship matrices.
 # snp_file: full path to the CC variant file.
+# thr: LOD threshold above which to write out top SNPs.
 # cores: number of cores to use.
 # out_dir: full path to output directory.
 # verbose: boolean that is TRUE if progress should be shown.
 run_gwas = function(genoprobs, map, pheno, kinship = NULL, addcovar = NULL, 
-                    intcovar = NULL, snp_file, cores = 1, out_dir,
+                    intcovar = NULL, snp_file, thr = 4, cores = 1, out_dir,
                     verbose = FALSE) {
-  
+
   # Create SNP query function.
   snp_func  = create_variant_query_func(dbfile = snp_file)
   
@@ -40,7 +41,7 @@ run_gwas = function(genoprobs, map, pheno, kinship = NULL, addcovar = NULL,
     
     if(verbose) {
       print(paste0(pheno_name, " : ", length(samples2use)))
-    }
+    } # if(verbose)
     
     tmpK = K
     for(j in 1:length(K)) {
@@ -61,47 +62,41 @@ run_gwas = function(genoprobs, map, pheno, kinship = NULL, addcovar = NULL,
     tmpprobs = genoprobs[samples2use,]
     tmppheno = pheno[samples2use, pheno_name, drop = FALSE]
     
-    
-    pdf(file.path(out_dir, paste0(pheno_name, "_gwas.pdf")), width = 14, height = 8)
-    h5filename = file.path(out_dir, paste0(pheno_name, '_gwas.h5'))
-    
-    if(file.exists(h5filename)) {
-      file.remove(h5filename)
+    if(verbose) {  
+      print('   mapping')
     }
-    h5createFile(h5filename)
-    
-    # Map each chromosome.
-    for(chr in names(probs)) {
-    
-      if(verbose) {  
-        print(chr)
-      }
-      
-      h5createGroup(h5filename, paste0('chr', chr))
-      
-      assoc = scan1snps(genoprobs = tmpprobs[,chr], 
+    assoc = scan1snps(genoprobs = tmpprobs, 
                         map       = map,
                         pheno     = tmppheno[,pheno_name, drop = FALSE],
-                        kinship   = tmpK[[chr]],
+                        kinship   = tmpK,
                         addcovar  = tmpcovar,
-                        intcovar  = tmpintcovar, 
-                        chr       = chr,
-                        start     = 0,
-                        end       = 200,
+                        intcovar  = tmpintcovar,
                         query_func = snp_func,
-                        keep_all_snps = TRUE,
+                        keep_all_snps = FALSE,
                         cores      = cores)
       
-      plot_snpasso(assoc$lod, assoc$snpinfo, main = paste(pheno_name, ' : CHR', chr))
-      
-      h5write(assoc$lod,     h5filename, paste0('chr', chr, '/lod'))
-      h5write(assoc$snpinfo, h5filename, paste0('chr', chr, '/snpinfo'))
-      
-    } # for(chr)
-    
+    if(verbose) {  
+      print('   ploting')
+    }
+    png(file.path(out_dir, paste0(pheno_name, '_gwas.png')), width = 2000, height = 1000, res = 128)
+    plot_snpasso(assoc$lod, assoc$snpinfo, main = pheno_name)
+    abline(h = thr, col = 'red', lwd = 2)
     dev.off()
-    H5close()
-
+      
+    if(verbose) {  
+      print('   writing')
+    }
+    
+    saveRDS(assoc, file = file.path(out_dir, paste0(pheno_name, '_gwas.rds')))
+    
+    topsnps = top_snps(assoc$lod, assoc$snpinfo, drop = 1.5)
+    topsnps = subset(topsnps, lod >= thr)
+    
+    if(nrow(topsnps) > 0) {
+       readr::write_csv(topsnps, file.path(out_dir, paste0(pheno_name, '_gwas_chr', chr,'.csv')))
+    } # if(nrow(topsnps) > 0)
+    
+    rm(assoc, topsnps, tmpprobs, tmpK)  
     gc()
     
   } # for(i)
@@ -168,6 +163,7 @@ run_gwas_perms = function(genoprobs, map, pheno, kinship = NULL, addcovar = NULL
   return(perms)
   
 } # run_gwas_perms()
+
 
 
 ################################################################################

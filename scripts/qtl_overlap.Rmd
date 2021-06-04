@@ -1,0 +1,342 @@
+---
+title: "DO TB QTL Overlap"
+author: "Daniel Gatti"
+date: "2/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(pcaMethods)
+library(GenomicRanges)
+library(tidyverse)
+library(qtl2)
+
+base_dir = '/media/dmgatti/hdb/projects/TB/'
+qtl_dir  = file.path(base_dir, 'results', 'qtl2', 'gen_factor2')
+fig_dir  = file.path(base_dir, 'figures')
+qtl_file = file.path(qtl_dir, 'tb_qtl_peaks.csv')
+map_file = file.path(base_dir, 'haplo_reconstr', 'qtl2', 'pmap.csv')
+results_dir = file.path(base_dir, 'results', 'qtl_overlap')
+input_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata')
+```
+
+Read in the DO TB QTL peaks from the linkage mapping.
+
+```{r read_peaks}
+peaks = readr::read_csv(qtl_file) %>% 
+                 arrange(chr, pos)
+```
+
+Make a plot of the overlap between QTL intervals.
+
+```{r plot_qtl_overlap,fig.height=8}
+png(file.path(results_dir, 'qtl_overlap.png'), width = 800, height = 800)
+p = ggplot(peaks) +
+        geom_segment(aes(x = ci_lo, xend = ci_hi, y = lodcolumn, yend = lodcolumn)) +
+        geom_point(aes(pos, lodcolumn)) +
+        facet_wrap(~chr) +
+        labs(title = 'DO TB QTL Overlap', x = '', y = '')
+print(p)
+dev.off()
+p
+```
+
+Get a table of QTL overlaps.
+
+```{r table_qtl_lverlap}
+# Create GRanges.
+peaks_gr = GRanges(seqnames = peaks$chr, 
+                   ranges   = IRanges(start = peaks$ci_lo, end = peaks$ci_hi))
+# Find overlaps.
+ol = findOverlaps(peaks_gr, peaks_gr)
+
+tmp = tibble(q = queryHits(ol), s = subjectHits(ol)) %>% 
+        filter(q != s)
+
+# Get clusters.
+result = peaks %>% 
+           mutate(index = 1:nrow(peaks),
+                  cluster = 0)
+cl = 1
+for(i in 1:nrow(tmp)) {
+  value = dplyr::slice(tmp, i) %>% dplyr::pull(q)
+  rows = union(value, dplyr::filter(tmp, s == value) %>% pull(q))
+  result = result %>% 
+             mutate(cluster = if_else(index %in% rows, cl, cluster))
+  cl = cl + 1
+} # for(i)
+
+result = result %>% 
+           filter(cluster > 0) %>% 
+           mutate(cluster = dense_rank(cluster))
+
+write_csv(result, file = file.path(results_dir, 'qtl_overlap.csv'))
+
+result
+```
+
+For each cluster, read in the linkage mapping coefficients and see if they are correlated within the cluster.
+
+```{r corr_coefs}
+
+result = readr::read_csv(file.path(results_dir, 'qtl_overlap.csv'))
+
+# Read in map.
+map = read_csv(map_file, col_types = 'ccn')
+
+unique_clusters = unique(result$cluster)
+
+for(i in unique_clusters) {
+  
+  cl = subset(result, cluster == i)
+  min_mb = min(cl$ci_lo)
+  max_mb = max(cl$ci_hi)
+  
+  cluster_coefs = vector('list', nrow(cl))
+  
+  for(j in 1:nrow(cl)) {
+    load(file.path(qtl_dir, str_c(cl$lodcolumn[j], '_qtl2.Rdata')))
+    cluster_coefs[[j]] = as.data.frame(coefs[[as.character(cl$chr[j])]]) %>% 
+                           rownames_to_column(var = 'marker') %>% 
+                           left_join(map) %>% 
+                           dplyr::filter(pos >= min_mb & pos <= max_mb) %>% 
+                           dplyr::select(marker, chr, pos, A:H)
+  } # for(j)
+
+  # Calculate the correlation of LOD scores in the QTL interval between each pair of phenotypes in the cluster.
+  coef_cor = matrix(0, nrow = length(cluster_coefs), ncol = length(cluster_coefs),
+                    dimnames = list(cl$lodcolumn, cl$lodcolumn))
+
+  for(j in seq_along(cluster_coefs)) {
+    mat1 = as.matrix(cluster_coefs[[j]][, LETTERS[1:8]])
+    for(k in j:length(cluster_coefs)) {
+      mat2 = as.matrix(cluster_coefs[[k]][, LETTERS[1:8]])
+      coef_cor[j,k] = mean(diag(cor(mat1, mat2)))
+      coef_cor[k,j] = coef_cor[j,k]
+    } # for(k)
+  } # for(j)
+  
+  write_csv(as.data.frame(coef_cor), file.path(results_dir, str_c('cluster', i, '_coef_corr.csv')))
+
+} # for(i)
+```
+
+Get coefficient correlations from random sets of phenotypes at random locations in the genome to estimate the empirical distribution of null correlation stats. NOTE: We really should do this for ALL chr.
+
+```{r load_coef_info}
+coef_files = tibble(tmp = dir(qtl_dir, pattern = '_coef_chr')) %>% 
+               separate(tmp, into = c('keep', 'junk'), sep = '\\.') %>% 
+               dplyr::select(-junk) %>% 
+               mutate(keep = str_replace(keep, '_coef_', ';coef;')) %>% 
+               separate(keep, into = c('pheno', 'junk', 'chr2'), sep = ';') %>% 
+               dplyr::select(-junk) %>% 
+               mutate(chr = str_replace(chr2, 'chr', '')) %>% 
+               select(-chr2)
+coef_files = coef_files %>% 
+               filter(chr %in% {count(coef_files, chr) %>% filter(n > 1) %>% pull(chr)})
+```
+
+```{r est_emp_coef_corr_null}
+nperm = 1000
+unique_chr = unique(coef_files$chr)
+null_corr = data.frame(pheno1 = rep(NA, nperm),
+                       pheno2 = rep(NA, nperm),
+                       chr    = rep(NA, nperm),
+                       start  = rep(0, nperm),
+                       end    = rep(0, nperm),
+                       corr   = rep(0, nperm))
+
+for(p in 1:nperm) {
+  
+  if(p %% 10 == 0) print(p)
+  
+  # Select a chr.
+  curr_chr = sample(unique_chr, size = 1)
+  
+  # Select phenotypes.
+  phenos = filter(coef_files, chr == curr_chr)
+  phenos = phenos[sample(1:nrow(phenos), size = 2),]
+
+  load(file.path(qtl_dir, str_c(phenos$pheno[1], '_qtl2.Rdata')))
+  coef1 = coefs[[curr_chr]]
+  
+  load(file.path(qtl_dir, str_c(phenos$pheno[2], '_qtl2.Rdata')))
+  coef2 = coefs[[curr_chr]]
+
+  # Select a Mb range.
+  curr_map = subset(map, marker %in% rownames(coef1))
+  sample_range = which(curr_map$pos <= curr_map$pos[nrow(curr_map)] - 5.0)
+  start = sample(sample_range, size = 1)
+  end   = which.min(abs(curr_map$pos - (curr_map$pos[start] + 5.0)))
+  map_range = curr_map[start:end,]
+  
+  # Get coef matrices.
+  coef1 = coef1[map_range$marker, LETTERS[1:8]]
+  coef2 = coef2[map_range$marker, LETTERS[1:8]]
+  
+  # Get mean correlation of each coefficient in this region.
+  null_corr[p,] = c(phenos$pheno,
+                    curr_chr,
+                    map$pos[start],
+                    map$pos[end],
+                    mean(diag(cor(coef1,coef2))))
+  
+} # for(p)
+
+write_csv(data.frame(null_corr), file.path(results_dir, 'coef_corr_null_sims.csv'))
+```
+
+```{r}
+hist(as.numeric(null_corr$corr), breaks = 40)
+```
+
+##########
+
+Alternate approach. For each phenotype in each cluster, get the location of the maximum LOD. Add each of the other phenotypes into the mapping model and record the LOD drop.
+
+Read in the QTL mapping input data.
+
+```{r load_qtl_data}
+load(input_file)
+addcovar = model.matrix(~gen, data = covar)[,-1,drop = FALSE]
+rankZ = function(x) {
+  x = rank(x, na.last = "keep", ties.method = "average") / (sum(!is.na(x)) + 1)
+  return(qnorm(x))
+}
+pheno_rz = cbind(pheno_rz, survival = rankZ(covar$euth_day))
+```
+
+Create a result table with each phenotype matched with all of the other phenotypes and number of samples, max LOD and reduced LOD.
+
+```{r map_other_pheno}
+lod_result = NULL
+
+for(i in 1:nrow(result)) {
+  
+  p1_name = result$lodcolumn[i]
+  
+  if(p1_name != 'survival') {
+    
+    local_result = tibble(pheno1 = rep(p1_name, ncol(pheno_rz)),
+                          pheno2 = colnames(pheno_rz),
+                          chr    = result$chr[i],
+                          pos    = result$pos[i],
+                          full_lod = 0,
+                          red_lod = 0,
+                          n = 0)
+    
+    pr = pull_genoprobpos(probs, map, result$chr[i], result$pos[i])
+    
+    full_mod = fit1(genoprobs = pr, pheno = pheno_rz[,p1_name,drop = FALSE], 
+                      kinship = K[[result$chr[i]]], addcovar = addcovar, blup = FALSE)
+    
+    local_result$full_lod = full_mod$lod
+    
+    for(j in 1:ncol(pheno_rz)) {
+      
+      p2_name = colnames(pheno_rz)[j]
+      tmp_covar = cbind(addcovar, pheno_rz[,p2_name, drop = FALSE])
+      mod = fit1(genoprobs = pr, pheno = pheno_rz[,p1_name,drop = FALSE], 
+                 kinship = K[[result$chr[i]]], addcovar = tmp_covar, blup = FALSE)
+      local_result$red_lod[j] = mod$lod
+      local_result$n[j] = length(mod$fitted)
+    
+    } # for(j)
+  } # if(p1_name ~= 'survival')
+  
+  lod_result = bind_rows(lod_result, local_result)
+} # for(i)
+
+write_csv(lod_result, file.path(results_dir, 'remap_other_pheno_as_covar.csv'))
+```
+
+Calculate the LOD drop and remove rows where the sample size was low. Low sample size will drop the LOD as well.
+
+```{r hist_n}
+ggplot(lod_result, aes(n)) +
+  geom_histogram(bins = 100)
+```
+
+Selecting a sample size threshold of 400.
+
+```{r}
+lod_result = lod_result %>% 
+               mutate(lod_drop = full_lod - red_lod)
+               #filter(n >= 400, pheno1 != pheno2)
+```
+
+
+```{r}
+hist(lod_result$lod_drop)
+```
+
+```{r}
+lod_drop_mat = lod_result %>% 
+                 select(pheno1, pheno2, chr, lod_drop) %>% 
+                 arrange(chr) %>% 
+                 unite(pheno1, pheno1, chr, sep = '_', remove = FALSE) %>% 
+                 unite(pheno2, pheno2, chr, sep = '_', remove = TRUE) %>% 
+                 pivot_wider(id_cols = pheno1, names_from = pheno2, values_from = lod_drop, values_fn = {mean}) %>% 
+                 as.data.frame()
+rownames(lod_drop_mat) = lod_drop_mat[,1]
+lod_drop_mat = as.matrix(lod_drop_mat[,-1])
+```
+
+
+```{r}
+cl1 = lod_drop_mat[endsWith(rownames(lod_drop_mat), '_1'), endsWith(colnames(lod_drop_mat), '_1')]
+cl1_cor = cor(cl1, use = 'pair')
+cl1_cor[is.na(cl1_cor)] = 0
+hcl = hclust(as.dist(1.0 - cl1_cor), method = 'average')
+cl1 = cl1[,hcl$order]
+heatmap(cl1)
+```
+
+----------------------------
+
+For each cluster, map the first and second PC. Bayesian PCA seemed to work well before.
+
+```{r cluster_pca_qtl}
+unique_clusters = unique(result$cluster)
+for(cl in unique_clusters) {
+  
+  print(str_c('Cluster ', cl))
+  
+  result_ss = subset(result, cluster == cl)
+  chr = unique(result_ss$chr)
+  
+  pheno_ss = pheno_rz[,result_ss$lodcolumn]
+  pheno_ss = pheno_ss[complete.cases(pheno_ss),]
+  
+  pheno_pc = pca(pheno_ss, method = 'bpca', nPcs = 2)
+  pheno_pc = scores(pheno_pc)
+  
+  pca_lod = scan1(genoprobs = probs[,chr], pheno = pheno_pc[,1,drop = FALSE], 
+                  kinship = K[[chr]], addcovar = addcovar, cores = 4)
+  
+  png(file.path(results_dir, str_c('cluster_', cl, '_pc1_lod.png')), width = 1000, height = 800, res = 128)
+  plot_scan1(pca_lod, map, lodcolumn = 1, main = str_c('Cluster', cl, 'PC1', sep = ' '))
+  dev.off()
+
+  pca_blup = scan1blup(genoprobs = probs[,chr], pheno = pheno_pc[,1,drop = FALSE], 
+                       kinship = K[[chr]], addcovar = addcovar, cores = 4)
+  
+  png(file.path(results_dir, str_c('cluster_', cl, '_pc1_blup.png')), width = 1000, height = 800, res = 128)
+  plot_coefCC(pca_blup, map, scan1 = pca_lod, main = str_c('Cluster', cl, 'PC1', sep = ' '), 
+              xlim = c(min(result_ss$ci_lo), max(result_ss$ci_hi)))
+  dev.off()
+  
+  save(pca_lod, pca_blup, file = file.path(results_dir, str_c('cluster_', cl, '_pc1_qtl.Rdata')))
+  
+} # for(cl)
+```
+
+
+
+
+
+
+
+

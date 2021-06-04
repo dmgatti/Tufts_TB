@@ -17,7 +17,7 @@ base_dir   = '/media/dmgatti/hdb/projects/TB'
 input_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata')
 pheno_file = file.path(base_dir, 'data', 'phenotypes', '2020-02-17 JDO TB lung phenotypes.xlsx')
 snp_file   = '/media/dmgatti/hda/data/MUGA/cc_variants.sqlite'
-result_dir = file.path(base_dir, 'results', 'qtl2', 'gen_factor')
+result_dir = file.path(base_dir, 'results', 'qtl2', 'gwas')
 
 source(file.path(base_dir, 'scripts', 'gwas_pipeline.R'))
 
@@ -36,34 +36,26 @@ run_gwas(genoprobs = probs,
          kinship   = K, 
          addcovar  = addcovar, 
          snp_file  = snp_file, 
-         cores     = 4, 
+         cores     = 10, 
          out_dir   = result_dir,
          verbose   = TRUE)
 
 ##############
 # Permutations.
 
-pheno_name = "cxcl5"
+pheno_name = "lung_cxcl5"
 
 samples2use = which(!is.na(pheno[,pheno_name]))
 
 print(paste0(pheno_name, " : ", length(samples2use)))
 
-perms =
+perms = NULL
 if(!file.exists(file.path(result_dir, "gwas_perms.rds"))) {
-   tmpK = K
-   for(j in 1:length(K)) {
-     tmpK[[j]] = K[[j]][samples2use, samples2use]
-   }
-   tmp_covar = addcovar[samples2use,,drop = FALSE]
-   tmp_covar = tmp_covar[,colSums(tmp_covar) > 0,drop = FALSE]
 
-   perms = qtl2::scan1perm(genoprobs = probs[samples2use,], 
-                           pheno     = pheno[samples2use,pheno_name, drop = FALSE], 
-                           kinship   = tmpK, 
-                           addcovar  = tmp_covar, 
-                           cores     = 10,
-                           n_perm    = 1000)
+   perms = run_gwas_perms(genoprobs = probs, map = map, pheno = pheno_rx[,pheno_name,drop = FALSE], 
+                          kinship = K, addcovar = addcovar, 
+                          snp_file = snp_file, cores = 10, 
+                          out_dir = result_dir, nperm = 1000)
    saveRDS(perms, file = file.path(result_dir, "gwas_perms.rds"))
 } else {
   perms = readRDS(file = file.path(result_dir, "gwas_perms.rds"))

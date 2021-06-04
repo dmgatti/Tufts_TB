@@ -1,0 +1,1274 @@
+---
+title: "DO TB qtl2 Peak Harvest"
+author: "Daniel Gatti"
+date: "4/27/2021"
+output: 
+    html_document:
+        toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+# Hack to fix not being able to load org.Mm.eg.db.
+# See https://github.com/rstudio/rstudio/issues/9219
+options(connectionObserver = NULL)
+options(stringsAsFactors = FALSE)
+
+library(knitr)
+library(survival)
+library(Mus.musculus)
+library(qtl2)
+
+base_dir   = '/media/dmgatti/hdb/projects/TB'
+input_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata') 
+expr_file  = file.path(base_dir, 'data', 'expression', 'tb_expr.csv')
+result_dir = file.path(base_dir, 'results', 'qtl2', 'gen_factor2')
+peak_file  = file.path(result_dir, 'tb_qtl_peaks.csv')
+perm_file  = file.path(result_dir, 'perms.rds')
+```
+
+```{r tx2gene}
+# Given a GRanges object of transcripts as returned by transcriptsByOverlaps(),
+# convert to one row per Entrez ID. Also subset to only include transcripts with 
+# Entrez IDs.
+tx2gene = function(transcripts) {
+  transcripts = subset(transcripts, sapply(transcripts$GENEID, length) > 0)
+  genes = split(transcripts, unlist(transcripts$GENEID))
+  genes = lapply(genes, function(z) { GRanges(seqnames = unique(seqnames(z)), ranges = IRanges(start = min(start(z)), end = max(end(z)))) })
+  genes = GRangesList(genes)
+  genes = unlist(genes)
+  genes$entrez = names(genes)
+  return(genes)
+} # tx2gene()
+```
+
+
+```{r load_data, include=FALSE}
+# Setup mouse Txdb from Bioconductor.
+tx = keepStandardChromosomes(TxDb.Mmusculus.UCSC.mm10.knownGene)
+
+# Read in the DOQTL formatted data.
+load(input_file)
+
+# CC SNP and gene database files (from Karl).
+ccsnpdb = "/media/dmgatti/hda/data/MUGA/cc_variants.sqlite"
+mgidb   = "/media/dmgatti/hda/data/MUGA/mouse_genes_mgi.sqlite"
+snp_func  = create_variant_query_func(dbfile = ccsnpdb)
+gene_func = create_gene_query_func(dbfile = mgidb)
+ensembl = 93
+
+addcovar = model.matrix(~gen, data = covar)[,-1,drop = FALSE]
+
+# Read expression data.
+expr = read.csv(expr_file)
+rownames(expr) = expr[,1]
+expr = as.matrix(expr[,-1])
+colnames(expr) = sub('^X', '', colnames(expr))
+
+# Get the genes that we can find from the Bioconductor TxDB.
+annot = select(tx, keys = rownames(expr), columns = c('TXNAME', 'TXCHROM', 'TXSTART', 'TXEND'), keytype = 'GENEID')
+# Make a new data structure with only one gene per row.
+annot  = annot[complete.cases(annot),]
+tmp    = split(annot, annot$GENEID)
+tmp    = lapply(tmp, function(z) { GRanges(seqnames = unique(z$TXCHROM), ranges = IRanges(start = min(z$TXSTART), end = max(z$TXEND))) })
+tmp    = GRangesList(tmp)
+annot  = unlist(tmp)
+annot$entrez = names(annot)
+rm(tmp)
+
+# Synch genes and annotation.
+expr = expr[annot$entrez,]
+
+# Read QTL peaks.
+peaks = read.csv(peak_file)
+peaks = GRanges(seqnames = peaks$chr, 
+                ranges = IRanges(start = peaks$ci_lo * 1e6, end = peaks$ci_hi * 1e6),
+                mcols  = peaks[,c(2, 4:5, 8:15)])
+colnames(mcols(peaks)) = sub('^mcols\\.', '', colnames(mcols(peaks)))
+perms = readRDS(perm_file)
+thr = quantile(perms, probs = 0.95)
+
+# Keep peaks with lod > 7.76.
+top_peaks = subset(peaks, lod >= thr)
+top_peaks = top_peaks[order(as.numeric(as.character(runValue(seqnames(top_peaks))))),]
+
+```
+
+## QTL Peak Table
+
+We performed permutations to estimate the alpha = 0.05 significance threshold of LOD = `r thr`. Using this threshold, there are `r nrow(top_peaks)` QTL peaks, listed in the table below.
+
+```{r qtl_peak_table}
+print_peaks = function(p) {
+  tmp = as.data.frame(p)
+  tmp = tmp[,c('lodcolumn', 'seqnames', 'pos', 'lod', 'start', 'end')]
+  tmp$start = tmp$start / 1e6
+  tmp$end   = tmp$end   / 1e6
+  colnames(tmp) = c('Phenotype', 'Chr', 'Pos', 'LOD', 'CI low', 'CI high')
+  kable(tmp)
+} # print_peaks()
+print_peaks(top_peaks)
+```
+
+## Survival: Chr 1
+
+For each QTL peak with a LOD > 7.7, we searched for colocated QTL for other phenotypes with LOD >= 6.0.
+
+```{r get_cluster_peaks_1}
+row = 1
+pheno_name = top_peaks$lodcolumn[row]
+chr   = as.character(seqnames(top_peaks)[row])
+start = start(top_peaks)[row]
+end   = end(top_peaks)[row]
+title = 'Survival'
+
+cluster_qtl = subsetByOverlaps(peaks, top_peaks[row])
+print_peaks(cluster_qtl)
+```
+
+The survival QTL on Chr 1 is colocated with three other QTL for lung: Mtb Burden, Cxcl1, and Mmp8.
+
+```{r plot_lod_1}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_scan1(lod, map, main = title)
+add_threshold(map, thr, col = 2, lwd = 2)
+```
+
+
+```{r plot_colocated_qtl_1a}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+chr1_xlim = c(min(start(cluster_qtl)), max(end(cluster_qtl))) * 1e-6
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Survival: Chr 1', 
+            xlim = chr1_xlim, legend = 'bottomright')
+```
+
+```{r plot_colocated_qtl_1b}
+load(file.path(result_dir, 'mtb_burden_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'M. Tb Burden: Chr 1', 
+            xlim = chr1_xlim, legend = 'bottomright')
+```
+
+```{r plot_colocated_qtl_1c}
+load(file.path(result_dir, 'lung_cxcl1_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Cxcl1: Chr 1', 
+            xlim = chr1_xlim, legend = 'bottomright')
+```
+
+
+```{r plot_colocated_qtl_1d}
+load(file.path(result_dir, 'lung_mmp8_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Mmp8: Chr 1', 
+            xlim = chr1_xlim, legend = 'bottomright')
+```
+
+Below is the associtation mapping plot for Surrvival.
+
+```{r plot_assoc_1}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_snpasso(assocs[[chr]]$lod, assocs[[chr]]$snpinfo, main = title)
+```
+
+```{r get_genes_1}
+qtl_gr = GRanges(seqnames = paste0('chr', chr), ranges = IRanges(start = chr1_xlim[1] * 1e6, end = chr1_xlim[2] * 1e6))
+all_genes = transcriptsByOverlaps(tx, qtl_gr, columns = 'GENEID')
+all_genes = tx2gene(all_genes)
+
+# Get genes that overlap with the QTL interval.
+expr_genes = subsetByOverlaps(annot, qtl_gr)
+```
+
+There are `r length(unique(all_genes$entrez))` unique genes in the QTL interval. We measured expression for `r length(unique(expr_genes$entrez))` of these genes.
+
+```{r gene_pheno_cor_1} 
+local_pheno = matrix(covar$euth_day, dimnames = list(covar$mouse, 'survival'))
+samples     = intersect(rownames(local_pheno), colnames(expr))
+local_pheno = local_pheno[samples,,drop = FALSE]
+local_expr  = t(expr[expr_genes$entrez, samples])
+stopifnot(all(rownames(local_pheno) == rownames(local_expr)))
+pheno_expr_cor = t(cor(local_pheno, local_expr, use = 'pairwise'))
+```
+
+Plot a histogram of the correlations.
+
+```{r gene_pheno_cor_hist_1}
+hist(pheno_expr_cor)
+```
+
+The correlations are all very high. This makes me wonder whether the genes are changing due to disease or the passing of time. Plot the gene with the highest correlation vs. the phenotype.
+
+```{r gene_pheno_cor_plot_1}
+plot(local_pheno[,1], local_expr[,which.max(pheno_expr_cor)])
+```
+
+We can also select genes based on a T-test between mice euthanized early and those that survived to the end of the study.
+
+```{r survival_cor_1}
+survival = data.frame(age = covar$euth_day, euth = covar$euth)
+rownames(survival) = rownames(covar)
+survival = survival[samples,]
+surv_pv = setNames(rep(1, ncol(local_expr)), colnames(local_expr))
+for(i in 1:ncol(local_expr)) {
+  mod = t.test(local_expr[,i] ~ survival$euth)
+  surv_pv[i] = mod$p.value
+} # for(i)
+surv_pv = p.adjust(surv_pv, method = 'bonferroni')
+surv_pv = matrix(p.adjust(surv_pv, method = 'bonferroni'), ncol = 1, 
+                          dimnames = list(names(surv_pv), pheno_name))
+```
+
+Plot a histogram of the adjusted T-test p-values.
+
+```{r}
+hist(surv_pv[,1], breaks = 20)
+```
+There are still a lot of genes with low p-values. Plot the one with the lowest p-value (`r min(surv_pv)`).
+
+```{r}
+plot(local_expr[,which.min(surv_pv)] ~ survival$euth)
+```
+
+This looks reasonable.
+
+Produce a list of genes with mean expression and t-test p-values.
+
+```{r gene_pheno_list_1}
+all_genes = as.data.frame(all_genes)
+all_genes = all_genes[,c('entrez', 'seqnames', 'start', 'end')]
+colnames(all_genes)[2] = 'chr'
+all_genes$start = all_genes$start * 1e-6
+all_genes$end   = all_genes$end * 1e-6
+mean_expr = matrix(colMeans(local_expr, na.rm = TRUE), ncol = 1, dimnames = list(colnames(local_expr), 'mean_expr'))
+all_genes = merge(all_genes, mean_expr, by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+all_genes = merge(all_genes, surv_pv,   by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+
+# Get all SNPs in QTL interval.
+snps = snp_func(chr, start * 1e-6, end * 1e-6)
+snp_gr = GRanges(seqnames = paste0('chr', snps$chr),
+                 ranges = IRanges(start = snps$pos * 1e6, width = 1),
+                 mcols = snps[,c(1, 4:ncol(snps))])
+colnames(mcols(snp_gr)) = sub('^mcols\\.', '', colnames(mcols(snp_gr)))
+
+# Get exons for the annotated genes in the QTL interval.
+exons = exonsByOverlaps(tx, snp_gr, columns = 'GENEID')
+exons$GENEID = drop(exons$GENEID)
+exons = subset(exons, !is.na(exons$GENEID))
+snp_gr = subsetByOverlaps(snp_gr, exons)
+
+# Get Entrezgene IDs for exons.
+entrez = unique(exons$GENEID)
+result = data.frame(ENSEMBL = NA, ENTREZID = NA, SYMBOL = NA, GENENAME = NA, CONSEQUENCE = NA, NUM_SNPS = NA)
+
+for(i in entrez) {
+
+  # Get current exons, find overlaps with SNPs, and get current SNPs.
+  current_exon = subset(exons, GENEID == i)
+  ol = findOverlaps(current_exon, snp_gr)
+  current_snps = snp_gr[subjectHits(ol)]
+  current_snps = split(current_snps, queryHits(ol))
+  num_snps = sapply(current_snps, length)
+
+  ensembl = lapply(current_snps, function(z) { unique(strsplit(z$ensembl_gene, split = ',')) })
+  ensembl = lapply(ensembl, unlist)
+  ensembl = unique(unlist(ensembl))
+  ensembl = ensembl[!is.na(ensembl)]
+  
+  symbol = select(org.Mm.eg.db, keys = ensembl, columns = c('ENTREZID', 'SYMBOL', 'GENENAME'), keytype = 'ENSEMBL')
+  symbol = symbol[complete.cases(symbol),c('ENTREZID', 'ENSEMBL', 'SYMBOL', 'GENENAME')]
+  
+  # Parse the consequence column.
+  csq = lapply(current_snps, function(z) { strsplit(z$consequence, split = ',') })
+  csq = lapply(csq, unlist)
+  csq = lapply(csq, table)
+  csq = lapply(csq, data.frame)
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  csq = lapply(split(csq, csq$Var1), function(z) { data.frame(Var1 = as.character(z$Var1[1]), Freq = sum(z$Freq))})
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  tmp = strsplit(as.character(csq$Var1), split = ':')
+  csq = data.frame(ENSEMBL = sapply(tmp, '[', 1),
+                   CONSEQUENCE = sapply(tmp, '[', 2),
+                   NUM_SNPS = csq$Freq)
+  rm(tmp)
+  
+  result = rbind(result, merge(symbol, csq, by = 'ENSEMBL'))
+  
+} # for(i)
+
+result = subset(result, !is.na(entrez))
+colnames(result) = tolower(colnames(result))
+colnames(result) = sub('entrezid', 'entrez', colnames(result))
+
+result = merge(result, all_genes, by = 'entrez')
+rm(chr1_xlim)
+```
+
+```{r display_results_1}
+write.csv(result, file = file.path(result_dir, paste0(pheno_name, '_chr', chr, '_genes.csv')))
+kable(result)
+```
+
+
+## Lung Vegf: Chr 2
+
+For each QTL peak with a LOD > 7.7, we searched for colocated QTL for other phenotypes with LOD >= 6.0.
+
+```{r get_cluster_peaks_2}
+row = 2
+pheno_name = top_peaks$lodcolumn[row]
+chr   = as.character(seqnames(top_peaks)[row])
+start = start(top_peaks)[row]
+end   = end(top_peaks)[row]
+title = 'Lung Vegf'
+
+cluster_qtl = subsetByOverlaps(peaks, top_peaks[row])
+print_peaks(cluster_qtl)
+```
+
+The lung Vegf QTL on Chr 2 is not colocated with any other QTL.
+
+```{r plot_lod_2}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_scan1(lod, map, main = title)
+add_threshold(map, thr, col = 2, lwd = 2)
+```
+
+```{r plot_colocated_qtl_2a}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+chr2_xlim = c(min(start(cluster_qtl)), max(end(cluster_qtl))) * 1e-6
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Vegf: Chr 2', 
+            xlim = chr2_xlim, legend = 'bottomright')
+```
+
+Below is the association mapping plot for lung Vegf.
+
+```{r plot_assoc_2}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_snpasso(assocs[[chr]]$lod, assocs[[chr]]$snpinfo, main = title)
+```
+
+```{r get_genes_2}
+qtl_gr = GRanges(seqnames = paste0('chr', chr), ranges = IRanges(start = start, end = end))
+all_genes = transcriptsByOverlaps(tx, qtl_gr, columns = 'GENEID')
+all_genes = tx2gene(all_genes)
+
+# Get genes that overlap with the QTL interval.
+expr_genes = subsetByOverlaps(annot, qtl_gr)
+```
+
+There are `r length(unique(all_genes$entrez))` unique genes in the QTL interval. We measured expression for `r length(unique(expr_genes$entrez))` of these genes.
+
+```{r gene_pheno_cor_2} 
+local_pheno = matrix(log1p(pheno[,pheno_name]), dimnames = list(rownames(pheno), pheno_name))
+samples     = intersect(rownames(local_pheno), colnames(expr))
+local_pheno = local_pheno[samples,,drop = FALSE]
+local_expr  = t(expr[expr_genes$entrez, samples])
+stopifnot(all(rownames(local_pheno) == rownames(local_expr)))
+
+# Regress generation out of expr and pheno.
+gen = covar[samples,'gen']
+mod = lm(local_pheno[,1] ~ gen, na.action = na.exclude)
+local_pheno[,1] = mean(local_pheno[,1], na.rm = TRUE) + residuals(mod)
+
+for(i in 1:ncol(local_expr)) {
+  
+  mod = lm(local_expr[,i] ~ gen, na.action = na.exclude)
+  local_expr[,i] = mean(local_expr[,i], na.rm = TRUE) + residuals(mod)
+  
+} # for(i)
+
+pheno_expr_cor = t(cor(local_pheno, local_expr, use = 'pairwise'))
+n = nrow(local_expr)
+pheno_expr_t = pheno_expr_cor * sqrt((n - 2) / (1 - pheno_expr_cor^2))
+pheno_expr_pv = 2 * pt(abs(pheno_expr_t), df = n - 2, lower.tail = FALSE)
+pheno_expr_pv_adj =  matrix(p.adjust(pheno_expr_pv, method = 'bonferroni'), ncol = 1, 
+                            dimnames = list(rownames(pheno_expr_pv), 'bonf.p.value'))
+```
+
+Plot a histogram of the correlations.
+
+```{r gene_pheno_cor_hist_2}
+hist(pheno_expr_cor)
+```
+
+The correlations are all distributed more as I would expect. Plot the gene with the highest correlation vs. the phenotype, colored by DO generation.
+
+```{r gene_pheno_cor_plot_2}
+plot(local_pheno[,1], local_expr[,which.max(pheno_expr_cor)], pch = 16, col = as.numeric(gen) + 1)
+```
+
+Produce a list of genes with mean expression and correlation p-values.
+
+```{r gene_pheno_list_2}
+all_genes = as.data.frame(all_genes)
+all_genes = all_genes[,c('entrez', 'seqnames', 'start', 'end')]
+colnames(all_genes)[2] = 'chr'
+all_genes$start = all_genes$start * 1e-6
+all_genes$end   = all_genes$end * 1e-6
+mean_expr = matrix(colMeans(local_expr, na.rm = TRUE), ncol = 1, dimnames = list(colnames(local_expr), 'mean_expr'))
+all_genes = merge(all_genes, mean_expr, by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+all_genes = merge(all_genes, pheno_expr_pv_adj,   by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+
+# Get all SNPs in QTL interval.
+snps = snp_func(chr, start * 1e-6, end * 1e-6)
+snp_gr = GRanges(seqnames = paste0('chr', snps$chr),
+                 ranges = IRanges(start = snps$pos * 1e6, width = 1),
+                 mcols = snps[,c(1, 4:ncol(snps))])
+colnames(mcols(snp_gr)) = sub('^mcols\\.', '', colnames(mcols(snp_gr)))
+
+# Get exons for the annotated genes in the QTL interval.
+exons = exonsByOverlaps(tx, snp_gr, columns = 'GENEID')
+exons$GENEID = drop(exons$GENEID)
+exons = subset(exons, !is.na(exons$GENEID))
+snp_gr = subsetByOverlaps(snp_gr, exons)
+
+# Get Entrezgene IDs for exons.
+entrez = unique(exons$GENEID)
+result = data.frame(ENSEMBL = NA, ENTREZID = NA, SYMBOL = NA, GENENAME = NA, CONSEQUENCE = NA, NUM_SNPS = NA)
+
+for(i in entrez) {
+
+  # Get current exons, find overlaps with SNPs, and get current SNPs.
+  current_exon = subset(exons, GENEID == i)
+  ol = findOverlaps(current_exon, snp_gr)
+  current_snps = snp_gr[subjectHits(ol)]
+  current_snps = split(current_snps, queryHits(ol))
+  num_snps = sapply(current_snps, length)
+
+  ensembl = lapply(current_snps, function(z) { unique(strsplit(z$ensembl_gene, split = ',')) })
+  ensembl = lapply(ensembl, unlist)
+  ensembl = unique(unlist(ensembl))
+  ensembl = ensembl[!is.na(ensembl)]
+  
+  symbol = select(org.Mm.eg.db, keys = ensembl, columns = c('ENTREZID', 'SYMBOL', 'GENENAME'), keytype = 'ENSEMBL')
+  symbol = symbol[complete.cases(symbol),c('ENTREZID', 'ENSEMBL', 'SYMBOL', 'GENENAME')]
+  
+  # Parse the consequence column.
+  csq = lapply(current_snps, function(z) { strsplit(z$consequence, split = ',') })
+  csq = lapply(csq, unlist)
+  csq = lapply(csq, table)
+  csq = lapply(csq, data.frame)
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  csq = lapply(split(csq, csq$Var1), function(z) { data.frame(Var1 = as.character(z$Var1[1]), Freq = sum(z$Freq))})
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  tmp = strsplit(as.character(csq$Var1), split = ':')
+  csq = data.frame(ENSEMBL = sapply(tmp, '[', 1),
+                   CONSEQUENCE = sapply(tmp, '[', 2),
+                   NUM_SNPS = csq$Freq)
+  rm(tmp)
+  
+  result = rbind(result, merge(symbol, csq, by = 'ENSEMBL'))
+  
+} # for(i)
+
+result = subset(result, !is.na(entrez))
+colnames(result) = tolower(colnames(result))
+colnames(result) = sub('entrezid', 'entrez', colnames(result))
+
+result = merge(result, all_genes, by = 'entrez')
+rm(chr2_xlim)
+```
+
+```{r display_results_2}
+write.csv(result, file = file.path(result_dir, paste0(pheno_name, '_chr', chr, '_genes.csv')))
+kable(result)
+```
+
+## Lung S100a8: Chr 3
+
+For each QTL peak with a LOD > 7.7, we searched for colocated QTL for other phenotypes with LOD >= 6.0.
+
+```{r get_cluster_peaks_3}
+row = 3
+pheno_name = top_peaks$lodcolumn[row]
+chr   = as.character(seqnames(top_peaks)[row])
+start = start(top_peaks)[row]
+end   = end(top_peaks)[row]
+title = 'Lung S100a8'
+
+cluster_qtl = subsetByOverlaps(peaks, top_peaks[row])
+print_peaks(cluster_qtl)
+```
+
+The lung S100a8 QTL on Chr 3 is colocated with one other QTL for lung: Mtb Burden.
+
+```{r plot_lod_3}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_scan1(lod, map, main = title)
+add_threshold(map, thr, col = 2, lwd = 2)
+```
+
+```{r plot_colocated_qtl_3a}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+chr3_xlim = c(min(start(cluster_qtl)), max(end(cluster_qtl))) * 1e-6
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'S100a8: Chr 3', 
+            xlim = chr3_xlim, legend = 'bottomright')
+```
+
+```{r plot_colocated_qtl_3b}
+load(file.path(result_dir, 'mtb_burden_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'M. Tb Burden: Chr 3', 
+            xlim = chr3_xlim, legend = 'bottomleft')
+```
+
+It's difficult to say if these are the same peak. WSB and PWK are los in both plots, but the M.tb peak has a much lower LOD and less separattion of the effects.
+
+Below is the association mapping plot for lung S100a8.
+
+```{r plot_assoc_3}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_snpasso(assocs[[chr]]$lod, assocs[[chr]]$snpinfo, main = title)
+```
+
+```{r get_genes_3}
+qtl_gr = GRanges(seqnames = paste0('chr', chr), ranges = IRanges(start = start, end = end))
+all_genes = transcriptsByOverlaps(tx, qtl_gr, columns = 'GENEID')
+all_genes = tx2gene(all_genes)
+
+# Get genes that overlap with the QTL interval.
+expr_genes = subsetByOverlaps(annot, qtl_gr)
+```
+
+There are `r length(unique(all_genes$entrez))` unique genes in the QTL interval. We measured expression for `r length(unique(expr_genes$entrez))` of these genes.
+
+```{r gene_pheno_cor_3} 
+local_pheno = matrix(log1p(pheno[,pheno_name]), dimnames = list(rownames(pheno), pheno_name))
+samples     = intersect(rownames(local_pheno), colnames(expr))
+local_pheno = local_pheno[samples,,drop = FALSE]
+local_expr  = t(expr[expr_genes$entrez, samples])
+stopifnot(all(rownames(local_pheno) == rownames(local_expr)))
+
+# Regress generation out of expr and pheno.
+gen = covar[samples,'gen']
+mod = lm(local_pheno[,1] ~ gen, na.action = na.exclude)
+local_pheno[,1] = mean(local_pheno[,1], na.rm = TRUE) + residuals(mod)
+
+for(i in 1:ncol(local_expr)) {
+  
+  mod = lm(local_expr[,i] ~ gen, na.action = na.exclude)
+  local_expr[,i] = mean(local_expr[,i], na.rm = TRUE) + residuals(mod)
+  
+} # for(i)
+
+pheno_expr_cor = t(cor(local_pheno, local_expr, use = 'pairwise'))
+n = nrow(local_expr)
+pheno_expr_t = pheno_expr_cor * sqrt((n - 2) / (1 - pheno_expr_cor^2))
+pheno_expr_pv = 2 * pt(abs(pheno_expr_t), df = n - 2, lower.tail = FALSE)
+pheno_expr_pv_adj =  matrix(p.adjust(pheno_expr_pv, method = 'bonferroni'), ncol = 1, 
+                            dimnames = list(rownames(pheno_expr_pv), 'bonf.p.value'))
+```
+
+Plot a histogram of the correlations.
+
+```{r gene_pheno_cor_hist_3}
+hist(pheno_expr_cor)
+```
+
+The correlations are all distributed oddly, with a strange spike between 0.2 and 0.4. Plot the gene with the highest correlation vs. the phenotype, colored by DO generation.
+
+```{r gene_pheno_cor_plot_3}
+plot(local_pheno[,1], local_expr[,which.max(pheno_expr_cor)], pch = 16, col = as.numeric(gen) + 1)
+```
+
+Produce a list of genes with mean expression and correlation p-values.
+
+```{r gene_pheno_list_3}
+all_genes = as.data.frame(all_genes)
+all_genes = all_genes[,c('entrez', 'seqnames', 'start', 'end')]
+colnames(all_genes)[2] = 'chr'
+all_genes$start = all_genes$start * 1e-6
+all_genes$end   = all_genes$end * 1e-6
+mean_expr = matrix(colMeans(local_expr, na.rm = TRUE), ncol = 1, dimnames = list(colnames(local_expr), 'mean_expr'))
+all_genes = merge(all_genes, mean_expr, by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+all_genes = merge(all_genes, pheno_expr_pv_adj,   by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+
+# Get all SNPs in QTL interval.
+snps = snp_func(chr, start * 1e-6, end * 1e-6)
+snp_gr = GRanges(seqnames = paste0('chr', snps$chr),
+                 ranges = IRanges(start = snps$pos * 1e6, width = 1),
+                 mcols = snps[,c(1, 4:ncol(snps))])
+colnames(mcols(snp_gr)) = sub('^mcols\\.', '', colnames(mcols(snp_gr)))
+
+# Get exons for the annotated genes in the QTL interval.
+exons = exonsByOverlaps(tx, snp_gr, columns = 'GENEID')
+exons$GENEID = drop(exons$GENEID)
+exons = subset(exons, !is.na(exons$GENEID))
+snp_gr = subsetByOverlaps(snp_gr, exons)
+
+# Get Entrezgene IDs for exons.
+entrez = unique(exons$GENEID)
+result = data.frame(ENSEMBL = NA, ENTREZID = NA, SYMBOL = NA, GENENAME = NA, CONSEQUENCE = NA, NUM_SNPS = NA)
+
+for(i in entrez) {
+
+  # Get current exons, find overlaps with SNPs, and get current SNPs.
+  current_exon = subset(exons, GENEID == i)
+  ol = findOverlaps(current_exon, snp_gr)
+  current_snps = snp_gr[subjectHits(ol)]
+  current_snps = split(current_snps, queryHits(ol))
+  num_snps = sapply(current_snps, length)
+
+  ensembl = lapply(current_snps, function(z) { unique(strsplit(z$ensembl_gene, split = ',')) })
+  ensembl = lapply(ensembl, unlist)
+  ensembl = unique(unlist(ensembl))
+  ensembl = ensembl[!is.na(ensembl)]
+  
+  symbol = select(org.Mm.eg.db, keys = ensembl, columns = c('ENTREZID', 'SYMBOL', 'GENENAME'), keytype = 'ENSEMBL')
+  symbol = symbol[complete.cases(symbol),c('ENTREZID', 'ENSEMBL', 'SYMBOL', 'GENENAME')]
+  
+  # Parse the consequence column.
+  csq = lapply(current_snps, function(z) { strsplit(z$consequence, split = ',') })
+  csq = lapply(csq, unlist)
+  csq = lapply(csq, table)
+  csq = lapply(csq, data.frame)
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  csq = lapply(split(csq, csq$Var1), function(z) { data.frame(Var1 = as.character(z$Var1[1]), Freq = sum(z$Freq))})
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  tmp = strsplit(as.character(csq$Var1), split = ':')
+  csq = data.frame(ENSEMBL = sapply(tmp, '[', 1),
+                   CONSEQUENCE = sapply(tmp, '[', 2),
+                   NUM_SNPS = csq$Freq)
+  rm(tmp)
+  
+  result = rbind(result, merge(symbol, csq, by = 'ENSEMBL'))
+  
+} # for(i)
+
+result = subset(result, !is.na(entrez))
+colnames(result) = tolower(colnames(result))
+colnames(result) = sub('entrezid', 'entrez', colnames(result))
+
+result = merge(result, all_genes, by = 'entrez')
+```
+
+```{r display_results_3}
+write.csv(result, file = file.path(result_dir, paste0(pheno_name, '_chr', chr, '_genes.csv')))
+kable(result)
+```
+
+## Serum Cxcl5: Chr 5
+
+For each QTL peak with a LOD > 7.7, we searched for colocated QTL for other phenotypes with LOD >= 6.0.
+
+```{r get_cluster_peaks_4}
+row = 4
+pheno_name = top_peaks$lodcolumn[row]
+chr   = as.character(seqnames(top_peaks)[row])
+start = start(top_peaks)[row]
+end   = end(top_peaks)[row]
+title = 'Serum Cxcl5'
+
+cluster_qtl = subsetByOverlaps(peaks, top_peaks[row])
+print_peaks(cluster_qtl)
+```
+
+The serum Cxcl5 QTL on Chr 5 is colocated with one other QTL for lung: lung Cxcl5.
+
+```{r plot_lod_4}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_scan1(lod, map, main = title)
+add_threshold(map, thr, col = 2, lwd = 2)
+```
+
+```{r plot_colocated_qtl_4a}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+chr3_xlim = c(min(start(cluster_qtl)), max(end(cluster_qtl))) * 1e-6
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Serum Cxcl5: Chr 5', 
+            xlim = chr3_xlim, legend = 'bottomleft')
+```
+
+```{r plot_colocated_qtl_4b}
+load(file.path(result_dir, 'lung_cxcl5_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Cxcl5: Chr 5', 
+            xlim = chr3_xlim, legend = 'bottomleft')
+```
+
+It's difficult to say if these are the same peak. The allele effects are different.
+
+Below is the association mapping plot for serum Cxcl5.
+
+```{r plot_assoc_4}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_snpasso(assocs[[chr]]$lod, assocs[[chr]]$snpinfo, main = title)
+```
+
+```{r get_genes_4}
+qtl_gr = GRanges(seqnames = paste0('chr', chr), ranges = IRanges(start = start, end = end))
+all_genes = transcriptsByOverlaps(tx, qtl_gr, columns = 'GENEID')
+all_genes = tx2gene(all_genes)
+
+# Get genes that overlap with the QTL interval.
+expr_genes = subsetByOverlaps(annot, qtl_gr)
+```
+
+There are `r length(unique(all_genes$entrez))` unique genes in the QTL interval. We measured expression for `r length(unique(expr_genes$entrez))` of these genes.
+
+```{r gene_pheno_cor_4} 
+local_pheno = matrix(log1p(pheno[,pheno_name]), dimnames = list(rownames(pheno), pheno_name))
+samples     = intersect(rownames(local_pheno), colnames(expr))
+local_pheno = local_pheno[samples,,drop = FALSE]
+local_expr  = t(expr[expr_genes$entrez, samples])
+stopifnot(all(rownames(local_pheno) == rownames(local_expr)))
+
+# Regress generation out of expr and pheno.
+# Can't do this because we have so few samples with circulating Cxcl5.
+#gen = covar[samples,'gen']
+#mod = lm(local_pheno[,1] ~ gen, na.action = na.exclude)
+#local_pheno[,1] = mean(local_pheno[,1], na.rm = TRUE) + residuals(mod)
+
+for(i in 1:ncol(local_expr)) {
+  
+  mod = lm(local_expr[,i] ~ gen, na.action = na.exclude)
+  local_expr[,i] = mean(local_expr[,i], na.rm = TRUE) + residuals(mod)
+  
+} # for(i)
+
+pheno_expr_cor = t(cor(local_pheno, local_expr, use = 'pairwise'))
+n = nrow(local_expr)
+pheno_expr_t = pheno_expr_cor * sqrt((n - 2) / (1 - pheno_expr_cor^2))
+pheno_expr_pv = 2 * pt(abs(pheno_expr_t), df = n - 2, lower.tail = FALSE)
+pheno_expr_pv_adj =  matrix(p.adjust(pheno_expr_pv, method = 'bonferroni'), ncol = 1, 
+                            dimnames = list(rownames(pheno_expr_pv), 'bonf.p.value'))
+```
+
+Plot a histogram of the correlations.
+
+```{r gene_pheno_cor_hist_4}
+hist(pheno_expr_cor)
+```
+
+The correlations are distributed as expected. Plot the gene with the highest correlation vs. the phenotype, colored by DO generation.
+
+```{r gene_pheno_cor_plot_4}
+plot(local_pheno[,1], local_expr[,which.max(pheno_expr_cor)], pch = 16, col = as.numeric(gen) + 1)
+```
+
+Produce a list of genes with mean expression and correlation p-values.
+
+```{r gene_pheno_list_4}
+all_genes = as.data.frame(all_genes)
+all_genes = all_genes[,c('entrez', 'seqnames', 'start', 'end')]
+colnames(all_genes)[2] = 'chr'
+all_genes$start = all_genes$start * 1e-6
+all_genes$end   = all_genes$end * 1e-6
+mean_expr = matrix(colMeans(local_expr, na.rm = TRUE), ncol = 1, dimnames = list(colnames(local_expr), 'mean_expr'))
+all_genes = merge(all_genes, mean_expr, by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+all_genes = merge(all_genes, pheno_expr_pv_adj,   by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+
+# Get all SNPs in QTL interval.
+snps = snp_func(chr, start * 1e-6, end * 1e-6)
+snp_gr = GRanges(seqnames = paste0('chr', snps$chr),
+                 ranges = IRanges(start = snps$pos * 1e6, width = 1),
+                 mcols = snps[,c(1, 4:ncol(snps))])
+colnames(mcols(snp_gr)) = sub('^mcols\\.', '', colnames(mcols(snp_gr)))
+
+# Get exons for the annotated genes in the QTL interval.
+exons = exonsByOverlaps(tx, snp_gr, columns = 'GENEID')
+wh = which(sapply(exons$GENEID, length) > 1)
+exons$GENEID[wh] = sapply(exons$GENEID[wh], '[', 1)
+exons$GENEID = drop(exons$GENEID)
+exons = subset(exons, !is.na(exons$GENEID))
+snp_gr = subsetByOverlaps(snp_gr, exons)
+
+# Get Entrezgene IDs for exons.
+entrez = unique(exons$GENEID)
+result = data.frame(ENSEMBL = NA, ENTREZID = NA, SYMBOL = NA, GENENAME = NA, CONSEQUENCE = NA, NUM_SNPS = NA)
+
+for(i in entrez) {
+
+  # Get current exons, find overlaps with SNPs, and get current SNPs.
+  current_exon = subset(exons, GENEID == i)
+  ol = findOverlaps(current_exon, snp_gr)
+  current_snps = snp_gr[subjectHits(ol)]
+  current_snps = split(current_snps, queryHits(ol))
+  num_snps = sapply(current_snps, length)
+
+  ensembl = lapply(current_snps, function(z) { unique(strsplit(z$ensembl_gene, split = ',')) })
+  ensembl = lapply(ensembl, unlist)
+  ensembl = unique(unlist(ensembl))
+  ensembl = ensembl[!is.na(ensembl)]
+  
+  symbol = select(org.Mm.eg.db, keys = ensembl, columns = c('ENTREZID', 'SYMBOL', 'GENENAME'), keytype = 'ENSEMBL')
+  symbol = symbol[complete.cases(symbol),c('ENTREZID', 'ENSEMBL', 'SYMBOL', 'GENENAME')]
+  
+  # Parse the consequence column.
+  csq = lapply(current_snps, function(z) { strsplit(z$consequence, split = ',') })
+  csq = lapply(csq, unlist)
+  csq = lapply(csq, table)
+  csq = lapply(csq, data.frame)
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  csq = lapply(split(csq, csq$Var1), function(z) { data.frame(Var1 = as.character(z$Var1[1]), Freq = sum(z$Freq))})
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  tmp = strsplit(as.character(csq$Var1), split = ':')
+  csq = data.frame(ENSEMBL = sapply(tmp, '[', 1),
+                   CONSEQUENCE = sapply(tmp, '[', 2),
+                   NUM_SNPS = csq$Freq)
+  rm(tmp)
+  
+  result = rbind(result, merge(symbol, csq, by = 'ENSEMBL'))
+  
+} # for(i)
+
+result = subset(result, !is.na(entrez))
+colnames(result) = tolower(colnames(result))
+colnames(result) = sub('entrezid', 'entrez', colnames(result))
+
+result = merge(result, all_genes, by = 'entrez')
+```
+
+```{r display_results_4}
+write.csv(result, file = file.path(result_dir, paste0(pheno_name, '_chr', chr, '_genes.csv')))
+kable(result)
+```
+
+
+## Lung Cxcl1: Chr 15
+
+For each QTL peak with a LOD > 7.7, we searched for colocated QTL for other phenotypes with LOD >= 6.0.
+
+```{r get_cluster_peaks_5}
+row = 5
+pheno_name = top_peaks$lodcolumn[row]
+chr   = as.character(seqnames(top_peaks)[row])
+start = start(top_peaks)[row]
+end   = end(top_peaks)[row]
+title = 'Lung Cxcl1'
+
+cluster_qtl = subsetByOverlaps(peaks, top_peaks[row])
+print_peaks(cluster_qtl)
+```
+
+The lung Cxcl1 QTL on Chr 15 is colocated with three other QTL for lung: lung Cxcl2, Cxcl5 & Mmp8.
+
+```{r plot_lod_5}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_scan1(lod, map, main = title)
+add_threshold(map, thr, col = 2, lwd = 2)
+```
+
+```{r plot_colocated_qtl_5a}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+chr15_xlim = c(min(start(cluster_qtl)), max(end(cluster_qtl))) * 1e-6
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Cxcl1: Chr 15', 
+            xlim = chr15_xlim, legend = 'bottomleft')
+```
+
+```{r plot_colocated_qtl_6b}
+load(file.path(result_dir, 'lung_cxcl2_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Cxcl2: Chr 15', 
+            xlim = chr15_xlim, legend = 'bottomleft')
+```
+
+```{r plot_colocated_qtl_5c}
+load(file.path(result_dir, 'lung_cxcl5_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Cxcl5: Chr 15', 
+            xlim = chr15_xlim, legend = 'bottomleft')
+```
+
+```{r plot_colocated_qtl_5d}
+load(file.path(result_dir, 'lung_mmp8_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Mmp8: Chr 15', 
+            xlim = chr15_xlim, legend = 'bottomleft')
+```
+
+These peaks have similar allele effects patterns and may be driven by the same genes.
+
+Below is the association mapping plot for lung Cxcl1.
+
+```{r plot_assoc_5}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_snpasso(assocs[[chr]]$lod, assocs[[chr]]$snpinfo, main = title)
+```
+
+```{r get_genes_5}
+qtl_gr = GRanges(seqnames = paste0('chr', chr), ranges = IRanges(start = start, end = end))
+all_genes = transcriptsByOverlaps(tx, qtl_gr, columns = 'GENEID')
+all_genes = tx2gene(all_genes)
+
+# Get genes that overlap with the QTL interval.
+expr_genes = subsetByOverlaps(annot, qtl_gr)
+```
+
+There are `r length(unique(all_genes$entrez))` unique genes in the QTL interval. We measured expression for `r length(unique(expr_genes$entrez))` of these genes.
+
+```{r gene_pheno_cor_5} 
+local_pheno = matrix(log1p(pheno[,pheno_name]), dimnames = list(rownames(pheno), pheno_name))
+samples     = intersect(rownames(local_pheno), colnames(expr))
+local_pheno = local_pheno[samples,,drop = FALSE]
+local_expr  = t(expr[expr_genes$entrez, samples])
+stopifnot(all(rownames(local_pheno) == rownames(local_expr)))
+
+# Regress generation out of expr and pheno.
+gen = covar[samples,'gen']
+mod = lm(local_pheno[,1] ~ gen, na.action = na.exclude)
+local_pheno[,1] = mean(local_pheno[,1], na.rm = TRUE) + residuals(mod)
+
+for(i in 1:ncol(local_expr)) {
+  
+  mod = lm(local_expr[,i] ~ gen, na.action = na.exclude)
+  local_expr[,i] = mean(local_expr[,i], na.rm = TRUE) + residuals(mod)
+  
+} # for(i)
+
+pheno_expr_cor = t(cor(local_pheno, local_expr, use = 'pairwise'))
+n = nrow(local_expr)
+pheno_expr_t = pheno_expr_cor * sqrt((n - 2) / (1 - pheno_expr_cor^2))
+pheno_expr_pv = 2 * pt(abs(pheno_expr_t), df = n - 2, lower.tail = FALSE)
+pheno_expr_pv_adj =  matrix(p.adjust(pheno_expr_pv, method = 'bonferroni'), ncol = 1, 
+                            dimnames = list(rownames(pheno_expr_pv), 'bonf.p.value'))
+```
+
+Plot a histogram of the correlations.
+
+```{r gene_pheno_cor_hist_5}
+hist(pheno_expr_cor)
+```
+
+The correlations are distributed as expected. Plot the gene with the highest correlation vs. the phenotype, colored by DO generation.
+
+```{r gene_pheno_cor_plot_5}
+plot(local_pheno[,1], local_expr[,which.max(pheno_expr_cor)], pch = 16, col = as.numeric(gen) + 1)
+```
+
+Produce a list of genes with mean expression and correlation p-values.
+
+```{r gene_pheno_list_5}
+all_genes = as.data.frame(all_genes)
+all_genes = all_genes[,c('entrez', 'seqnames', 'start', 'end')]
+colnames(all_genes)[2] = 'chr'
+all_genes$start = all_genes$start * 1e-6
+all_genes$end   = all_genes$end * 1e-6
+mean_expr = matrix(colMeans(local_expr, na.rm = TRUE), ncol = 1, dimnames = list(colnames(local_expr), 'mean_expr'))
+all_genes = merge(all_genes, mean_expr, by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+all_genes = merge(all_genes, pheno_expr_pv_adj,   by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+
+# Get all SNPs in QTL interval.
+snps = snp_func(chr, start * 1e-6, end * 1e-6)
+snp_gr = GRanges(seqnames = paste0('chr', snps$chr),
+                 ranges = IRanges(start = snps$pos * 1e6, width = 1),
+                 mcols = snps[,c(1, 4:ncol(snps))])
+colnames(mcols(snp_gr)) = sub('^mcols\\.', '', colnames(mcols(snp_gr)))
+
+# Get exons for the annotated genes in the QTL interval.
+exons = exonsByOverlaps(tx, snp_gr, columns = 'GENEID')
+wh = which(sapply(exons$GENEID, length) > 1)
+exons$GENEID[wh] = sapply(exons$GENEID[wh], '[', 1)
+exons$GENEID = drop(exons$GENEID)
+exons = subset(exons, !is.na(exons$GENEID))
+snp_gr = subsetByOverlaps(snp_gr, exons)
+
+# Get Entrezgene IDs for exons.
+entrez = unique(exons$GENEID)
+result = data.frame(ENSEMBL = NA, ENTREZID = NA, SYMBOL = NA, GENENAME = NA, CONSEQUENCE = NA, NUM_SNPS = NA)
+
+for(i in entrez) {
+
+  # Get current exons, find overlaps with SNPs, and get current SNPs.
+  current_exon = subset(exons, GENEID == i)
+  ol = findOverlaps(current_exon, snp_gr)
+  current_snps = snp_gr[subjectHits(ol)]
+  current_snps = split(current_snps, queryHits(ol))
+  num_snps = sapply(current_snps, length)
+
+  ensembl = lapply(current_snps, function(z) { unique(strsplit(z$ensembl_gene, split = ',')) })
+  ensembl = lapply(ensembl, unlist)
+  ensembl = unique(unlist(ensembl))
+  ensembl = ensembl[!is.na(ensembl)]
+  
+  symbol = select(org.Mm.eg.db, keys = ensembl, columns = c('ENTREZID', 'SYMBOL', 'GENENAME'), keytype = 'ENSEMBL')
+  symbol = symbol[complete.cases(symbol),c('ENTREZID', 'ENSEMBL', 'SYMBOL', 'GENENAME')]
+  
+  # Parse the consequence column.
+  csq = lapply(current_snps, function(z) { strsplit(z$consequence, split = ',') })
+  csq = lapply(csq, unlist)
+  csq = lapply(csq, table)
+  csq = lapply(csq, data.frame)
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  csq = lapply(split(csq, csq$Var1), function(z) { data.frame(Var1 = as.character(z$Var1[1]), Freq = sum(z$Freq))})
+  tmp = NULL
+  for(j in seq_along(csq)) {
+    tmp = rbind(tmp, csq[[j]])
+  }
+  csq = tmp
+  tmp = strsplit(as.character(csq$Var1), split = ':')
+  csq = data.frame(ENSEMBL = sapply(tmp, '[', 1),
+                   CONSEQUENCE = sapply(tmp, '[', 2),
+                   NUM_SNPS = csq$Freq)
+  rm(tmp)
+  
+  result = rbind(result, merge(symbol, csq, by = 'ENSEMBL'))
+  
+} # for(i)
+
+result = subset(result, !is.na(entrez))
+colnames(result) = tolower(colnames(result))
+colnames(result) = sub('entrezid', 'entrez', colnames(result))
+
+result = merge(result, all_genes, by = 'entrez')
+```
+
+```{r display_results_5}
+write.csv(result, file = file.path(result_dir, paste0(pheno_name, '_chr', chr, '_genes.csv')))
+kable(result)
+```
+
+## Lung Necrosis Ratio: Chr 17
+
+For each QTL peak with a LOD > 7.7, we searched for colocated QTL for other phenotypes with LOD >= 6.0.
+
+```{r get_cluster_peaks_6}
+row = 6
+pheno_name = top_peaks$lodcolumn[row]
+chr   = as.character(seqnames(top_peaks)[row])
+start = start(top_peaks)[row]
+end   = end(top_peaks)[row]
+title = 'Lung Necrosis Ratio'
+
+cluster_qtl = subsetByOverlaps(peaks, top_peaks[row])
+print_peaks(cluster_qtl)
+```
+
+The lung necrosis ratio QTL on Chr 17 is colocated with three other QTL for lung: lung Cxcl1, Cxcl2, & % weight loss.
+
+```{r plot_lod_6}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_scan1(lod, map, main = title)
+add_threshold(map, thr, col = 2, lwd = 2)
+```
+
+```{r plot_colocated_qtl_6a}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+chr17_xlim = c(min(start(cluster_qtl)), max(end(cluster_qtl))) * 1e-6
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Necrosis Ratio: Chr 17', 
+            xlim = chr17_xlim, legend = 'bottomright')
+```
+
+```{r plot_colocated_qtl_5b}
+load(file.path(result_dir, 'lung_cxcl1_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Cxcl1: Chr 17', 
+            xlim = chr17_xlim, legend = 'bottomright')
+```
+
+```{r plot_colocated_qtl_6c}
+load(file.path(result_dir, 'lung_cxcl2_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = 'Lung Cxcl2: Chr 17', 
+            xlim = chr17_xlim, legend = 'bottomright')
+```
+
+```{r plot_colocated_qtl_6d}
+load(file.path(result_dir, 'pct_wt_loss_qtl2.Rdata'))
+plot_coefCC(coefs[[chr]], map, scan1_output = lod, main = '% Weight Loss: Chr 17', 
+            xlim = chr17_xlim, legend = 'bottomright')
+```
+
+These peaks have similar allele effects patterns and may be driven by the same genes.
+
+Below is the association mapping plot for lung necrosis ratio.
+
+```{r plot_assoc_6}
+load(file.path(result_dir, paste0(pheno_name, '_qtl2.Rdata')))
+plot_snpasso(assocs[[chr]]$lod, assocs[[chr]]$snpinfo, main = title)
+```
+
+```{r get_genes_6}
+qtl_gr = GRanges(seqnames = paste0('chr', chr), ranges = IRanges(start = start, end = end))
+all_genes = transcriptsByOverlaps(tx, qtl_gr, columns = 'GENEID')
+all_genes = tx2gene(all_genes)
+
+# Get genes that overlap with the QTL interval.
+expr_genes = subsetByOverlaps(annot, qtl_gr)
+```
+
+There are `r length(unique(all_genes$entrez))` unique genes in the QTL interval. We measured expression for `r length(unique(expr_genes$entrez))` of these genes.
+
+```{r gene_pheno_cor_6} 
+local_pheno = matrix(log(pheno[,pheno_name] + 1e-3), dimnames = list(rownames(pheno), pheno_name))
+samples     = intersect(rownames(local_pheno), colnames(expr))
+local_pheno = local_pheno[samples,,drop = FALSE]
+local_expr  = t(expr[expr_genes$entrez, samples])
+stopifnot(all(rownames(local_pheno) == rownames(local_expr)))
+
+# Regress generation out of expr and pheno.
+gen = covar[samples,'gen']
+mod = lm(local_pheno[,1] ~ gen, na.action = na.exclude)
+local_pheno[,1] = mean(local_pheno[,1], na.rm = TRUE) + residuals(mod)
+
+for(i in 1:ncol(local_expr)) {
+  
+  mod = lm(local_expr[,i] ~ gen, na.action = na.exclude)
+  local_expr[,i] = mean(local_expr[,i], na.rm = TRUE) + residuals(mod)
+  
+} # for(i)
+
+pheno_expr_cor = t(cor(local_pheno, local_expr, use = 'pairwise'))
+n = nrow(local_expr)
+pheno_expr_t = pheno_expr_cor * sqrt((n - 2) / (1 - pheno_expr_cor^2))
+pheno_expr_pv = 2 * pt(abs(pheno_expr_t), df = n - 2, lower.tail = FALSE)
+pheno_expr_pv_adj =  matrix(p.adjust(pheno_expr_pv, method = 'bonferroni'), ncol = 1, 
+                            dimnames = list(rownames(pheno_expr_pv), 'bonf.p.value'))
+```
+
+Plot a histogram of the correlations.
+
+```{r gene_pheno_cor_hist_6}
+hist(pheno_expr_cor)
+```
+
+The correlations are oddly distributed. Plot the gene with the highest correlation vs. the phenotype, colored by DO generation.
+
+```{r gene_pheno_cor_plot_6}
+plot(local_pheno[,1], local_expr[,which.max(pheno_expr_cor)], pch = 16, col = as.numeric(gen) + 1)
+```
+
+Produce a list of genes with mean expression and correlation p-values.
+
+```{r gene_pheno_list_6}
+all_genes = as.data.frame(all_genes)
+all_genes = all_genes[,c('entrez', 'seqnames', 'start', 'end')]
+colnames(all_genes)[2] = 'chr'
+all_genes$start = all_genes$start * 1e-6
+all_genes$end   = all_genes$end * 1e-6
+mean_expr = matrix(colMeans(local_expr, na.rm = TRUE), ncol = 1, dimnames = list(colnames(local_expr), 'mean_expr'))
+all_genes = merge(all_genes, mean_expr, by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+all_genes = merge(all_genes, pheno_expr_pv_adj,   by = 'row.names', all = TRUE)
+rownames(all_genes) = all_genes$Row.names
+all_genes = all_genes[,-1]
+
+# Get all SNPs in QTL interval.
+snps = snp_func(chr, start * 1e-6, end * 1e-6)
+snp_gr = GRanges(seqnames = paste0('chr', snps$chr),
+                 ranges = IRanges(start = snps$pos * 1e6, width = 1),
+                 mcols = snps[,c(1, 4:ncol(snps))])
+colnames(mcols(snp_gr)) = sub('^mcols\\.', '', colnames(mcols(snp_gr)))
+
+# Get exons for the annotated genes in the QTL interval.
+exons = exonsByOverlaps(tx, snp_gr, columns = 'GENEID')
+wh = which(sapply(exons$GENEID, length) > 1)
+exons$GENEID[wh] = sapply(exons$GENEID[wh], '[', 1)
+exons$GENEID = drop(exons$GENEID)
+exons = subset(exons, !is.na(exons$GENEID))
+snp_gr = subsetByOverlaps(snp_gr, exons)
+
+# Get Entrezgene IDs for exons.
+entrez = unique(exons$GENEID)
+result = data.frame(ENSEMBL = NA, ENTREZID = NA, SYMBOL = NA, GENENAME = NA, CONSEQUENCE = NA, NUM_SNPS = NA)
+
+for(i in entrez) {
+
+  # Get current exons, find overlaps with SNPs, and get current SNPs.
+  current_exon = subset(exons, GENEID == i)
+  ol = findOverlaps(current_exon, snp_gr)
+  current_snps = snp_gr[subjectHits(ol)]
+  current_snps = split(current_snps, queryHits(ol))
+  num_snps = sapply(current_snps, length)
+
+  ensembl = lapply(current_snps, function(z) { unique(strsplit(z$ensembl_gene, split = ',')) })
+  ensembl = lapply(ensembl, unlist)
+  ensembl = unique(unlist(ensembl))
+  ensembl = ensembl[!is.na(ensembl)]
+  
+  if(any(ensembl %in% keys(org.Mm.eg.db, keytype = 'ENSEMBL'))) {
+    
+    symbol = select(org.Mm.eg.db, keys = ensembl, columns = c('ENTREZID', 'SYMBOL', 'GENENAME'), keytype = 'ENSEMBL')
+    symbol = symbol[complete.cases(symbol),c('ENTREZID', 'ENSEMBL', 'SYMBOL', 'GENENAME')]
+  
+    # Parse the consequence column.
+    csq = lapply(current_snps, function(z) { strsplit(z$consequence, split = ',') })
+    csq = lapply(csq, unlist)
+    csq = lapply(csq, table)
+    csq = lapply(csq, data.frame)
+    tmp = NULL
+    for(j in seq_along(csq)) {
+      tmp = rbind(tmp, csq[[j]])
+    }
+    csq = tmp
+    csq = lapply(split(csq, csq$Var1), function(z) { data.frame(Var1 = as.character(z$Var1[1]), Freq = sum(z$Freq))})
+    tmp = NULL
+    for(j in seq_along(csq)) {
+      tmp = rbind(tmp, csq[[j]])
+    }
+    csq = tmp
+    tmp = strsplit(as.character(csq$Var1), split = ':')
+    csq = data.frame(ENSEMBL = sapply(tmp, '[', 1),
+                     CONSEQUENCE = sapply(tmp, '[', 2),
+                     NUM_SNPS = csq$Freq)
+    rm(tmp)
+  
+    result = rbind(result, merge(symbol, csq, by = 'ENSEMBL'))
+  } # if(ensembl %in% keys(org.Mm.eg.db))
+  
+} # for(i)
+
+result = subset(result, !is.na(entrez))
+colnames(result) = tolower(colnames(result))
+colnames(result) = sub('entrezid', 'entrez', colnames(result))
+
+result = merge(result, all_genes, by = 'entrez')
+```
+
+```{r display_results_6}
+write.csv(result, file = file.path(result_dir, paste0(pheno_name, '_chr', chr, '_genes.csv')))
+kable(result)
+```
+
+
+```{r sessionInfo}
+sessionInfo()
+```
+

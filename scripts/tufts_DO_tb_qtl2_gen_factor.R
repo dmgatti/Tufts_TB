@@ -3,11 +3,12 @@
 # DMG
 # Feb. 23, 2020
 ##############################
+library(pcaMethods)
 library(qtl2)
 
 base_dir   = '/media/dmgatti/hdb/projects/TB'
 input_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata') 
-result_dir = file.path(base_dir, 'results', 'qtl2', 'gen_factor')
+result_dir = file.path(base_dir, 'results', 'qtl2', 'gen_factor2')
 
 # Read in the DOQTL formatted data.
 load(input_file)
@@ -26,94 +27,98 @@ peaks = NULL
 
 addcovar = model.matrix(~gen, data = covar)[,-1,drop = FALSE]
 
-for(i in 1:ncol(pheno)) {
+for(i in 1:ncol(pheno_rz)) {
   
-  pheno_name = colnames(pheno)[i]
+  pheno_name = colnames(pheno_rz)[i]
   
-  samples2use = which(!is.na(pheno[,pheno_name]))
+  samples2use = which(!is.na(pheno_rz[,pheno_name]))
   
-  print(str_c(pheno_name, " : ", length(samples2use)))
+  print(paste0(pheno_name, " : ", length(samples2use)))
   
-  tmpK = K
-  for(j in 1:length(K)) {
-    tmpK[[j]] = K[[j]][samples2use, samples2use]
-  }
-  tmp_covar = addcovar[samples2use,,drop = FALSE]
-  tmp_covar = tmp_covar[,colSums(tmp_covar) > 0, drop = FALSE]
+  if(length(samples2use) > 200) {
+  
+    tmpK = K
+    for(j in 1:length(K)) {
+      tmpK[[j]] = K[[j]][samples2use, samples2use]
+    }
+    tmp_covar = addcovar[samples2use,,drop = FALSE]
+    tmp_covar = tmp_covar[,colSums(tmp_covar) > 0, drop = FALSE]
 
-  print("    QTL")  
-  lod = qtl2::scan1(genoprobs = probs[samples2use,], 
-                    pheno     = pheno[samples2use, pheno_name, drop = FALSE], 
-                    kinship   = tmpK, 
-                    addcovar  = tmp_covar, 
-                    cores = 10)
+    print("    QTL")  
+    lod = qtl2::scan1(genoprobs = probs[samples2use,], 
+                      pheno     = pheno_rz[samples2use, pheno_name, drop = FALSE], 
+                      kinship   = tmpK, 
+                      addcovar  = tmp_covar, 
+                      cores = 10)
   
-  png(file.path(result_dir, str_c(pheno_name, "_qtl.png")), width = 1000, height = 800, res = 128)
-  qtl2::plot_scan1(lod, map = map, main = pheno_name)
-  dev.off()
+    png(file.path(result_dir, str_c(pheno_name, "_qtl.png")), width = 1000, height = 800, res = 128)
+    qtl2::plot_scan1(lod, map = map, main = pheno_name)
+    dev.off()
   
-  current_peaks = find_peaks(lod, map, threshold = 6, prob = 0.95)
+    current_peaks = find_peaks(lod, map, threshold = 6, prob = 0.95)
   
-  # If the confidence interval takes up more than 20 Mb, use the peak LOD +/- 5 Mb.
-  coefs = NA
-  assocs = NA
-  if(nrow(current_peaks) > 0) {
+    # If the confidence interval takes up more than 20 Mb, use the peak LOD +/- 5 Mb.
+    coefs = NA
+    assocs = NA
+    if(nrow(current_peaks) > 0) {
     
-    for(j in 1:nrow(current_peaks)) {
-      if(current_peaks$ci_hi[j] - current_peaks$ci_lo[j] > 20) {
-        current_peaks$ci_hi[j] = current_peaks$pos[j] + 5
-        current_peaks$ci_lo[j] = max(current_peaks$pos[j] - 5, 3)  # This protects us from going off the beginning of the chr.
-      } # if(current_peaks$ci_hi[j] - current_peaks$ci_lo[j])
-    } # for(j)
+      for(j in 1:nrow(current_peaks)) {
+        if(current_peaks$ci_hi[j] - current_peaks$ci_lo[j] > 20) {
+          current_peaks$ci_hi[j] = current_peaks$pos[j] + 5
+          current_peaks$ci_lo[j] = max(current_peaks$pos[j] - 5, 3)  # This protects us from going off the beginning of the chr.
+        } # if(current_peaks$ci_hi[j] - current_peaks$ci_lo[j])
+      } # for(j)
     
-    peaks = rbind(peaks, current_peaks)
+      peaks = rbind(peaks, current_peaks)
   
-    coefs = vector("list", nrow(current_peaks))
-    names(coefs) = current_peaks$chr
-    assocs = vector("list", nrow(current_peaks))
-    names(assocs) = current_peaks$chr
+      coefs = vector("list", nrow(current_peaks))
+      names(coefs) = current_peaks$chr
+      assocs = vector("list", nrow(current_peaks))
+      names(assocs) = current_peaks$chr
   
-    for(j in 1:nrow(current_peaks)) {
+      for(j in 1:nrow(current_peaks)) {
     
-      curr_chr = current_peaks$chr[j]
-      print(str_c("    chr ", curr_chr))
-      start = current_peaks$ci_lo[j]
-      end   = current_peaks$ci_hi[j]
+        curr_chr = current_peaks$chr[j]
+        print(str_c("    chr ", curr_chr))
+        start = current_peaks$ci_lo[j]
+        end   = current_peaks$ci_hi[j]
   
-      print(paste("    coef", j))
-      coefs[[j]] = qtl2::scan1blup(genoprobs = probs[samples2use, curr_chr], 
-                            pheno     = pheno[samples2use, pheno_name, drop = FALSE], 
-                            kinship   = K[[curr_chr]], 
-                            addcovar  = tmp_covar,
-                            se = TRUE,
-                            cores = 10)
-      stopifnot(!is.nan(coefs[[j]]))
+        print(paste("    coef", j))
+        coefs[[j]] = qtl2::scan1blup(genoprobs = probs[samples2use, curr_chr], 
+                              pheno     = pheno_rz[samples2use, pheno_name, drop = FALSE], 
+                              kinship   = K[[curr_chr]], 
+                              addcovar  = tmp_covar,
+                              se = TRUE,
+                              cores = 10)
+        stopifnot(!is.nan(coefs[[j]]))
     
-      png(file.path(result_dir, str_c(pheno_name, "_coef_chr", curr_chr, ".png")), width = 1000, height = 800, res = 128)
-      plot_coefCC(coefs[[j]], map, scan1_output = lod, top_panel_prop = 0.6, main = pheno_name)
-      dev.off()
+        png(file.path(result_dir, str_c(pheno_name, "_coef_chr", curr_chr, ".png")), width = 1000, height = 800, res = 128)
+        plot_coefCC(coefs[[j]], map, scan1_output = lod, top_panel_prop = 0.6, main = pheno_name)
+        dev.off()
     
-      print(paste("    assoc", j))
-      assocs[[j]] = scan1snps(genoprobs = probs[,curr_chr], pheno = pheno[,pheno_name, drop = FALSE], kinship = tmpK[[curr_chr]], addcovar = tmp_covar,
-                        map = map, chr = curr_chr, start = max(1, start - 1), end = end + 1, query_func = snp_func, 
-                        keep_all_snps = TRUE, cores = 10)
+        print(paste("    assoc", j))
+        assocs[[j]] = scan1snps(genoprobs = probs[,curr_chr], pheno = pheno_rz[,pheno_name, drop = FALSE], 
+                                kinship = tmpK[[curr_chr]], addcovar = tmp_covar,
+                                map = map, chr = curr_chr, start = max(1, start - 1), end = end + 1, query_func = snp_func, 
+                                keep_all_snps = TRUE, cores = 10)
     
-      genes = gene_func(chr = curr_chr, start = start - 1, end = end + 1)
-      png(file.path(result_dir, str_c(pheno_name, "_assoc_chr", curr_chr, ".png")), width = 2400, height = 1600, res = 300)
-      plot_snpasso(scan1output = assocs[[j]]$lod, snpinfo = assocs[[j]]$snpinfo, genes = genes, drop_hilit = 1, 
-                   top_panel_prop = 0.3, main = pheno_name, colors = 'black')
-      dev.off()
+        genes = gene_func(chr = curr_chr, start = start - 1, end = end + 1)
+        png(file.path(result_dir, str_c(pheno_name, "_assoc_chr", curr_chr, ".png")), width = 2400, height = 1600, res = 300)
+        plot_snpasso(scan1output = assocs[[j]]$lod, snpinfo = assocs[[j]]$snpinfo, genes = genes, drop_hilit = 1, 
+                     top_panel_prop = 0.3, main = pheno_name, colors = 'black')
+        dev.off()
     
-      # Get the top SNPs.
-      top = top_snps(assocs[[j]]$lod, assocs[[j]]$snpinfo)
-      write_csv(top, path = file.path(result_dir, str_c(pheno_name, "_assoc_chr", curr_chr, "_top_snps.csv")))
+        # Get the top SNPs.
+        top = top_snps(assocs[[j]]$lod, assocs[[j]]$snpinfo)
+        write_csv(top, path = file.path(result_dir, str_c(pheno_name, "_assoc_chr", curr_chr, "_top_snps.csv")))
 
-    } # for(j)
+      } # for(j)
   
-  } # if(nrow(current_peaks > 0))
+    } # if(nrow(current_peaks > 0))
 
-  save(lod, coefs, assocs, file = file.path(result_dir, str_c(pheno_name, "_qtl2.Rdata")))
+    save(lod, coefs, assocs, file = file.path(result_dir, str_c(pheno_name, "_qtl2.Rdata")))
   
+  } #if(length(samples2use) > 200)
 } # for(i)
 
 write_csv(peaks, path = file.path(result_dir, "tb_qtl_peaks.csv"))
@@ -121,27 +126,41 @@ write_csv(peaks, path = file.path(result_dir, "tb_qtl_peaks.csv"))
 ##############
 # Permutations.
 
-pheno_name = "cxcl5"
+perm_file = file.path(result_dir, "perms.rds")
+perms = NULL
 
-samples2use = which(!is.na(pheno_rz[,pheno_name]))
+if(file.exists(file.path(result_dir, "perms.rds"))) {
+  
+   perms = readRDS(perm_file)
+   
+} else {
 
-print(str_c(pheno_name, " : ", length(samples2use)))
+   pheno_name = "cxcl5"
 
-tmpK = K
-for(j in 1:length(K)) {
-  tmpK[[j]] = K[[j]][samples2use, samples2use]
-}
-tmp_covar = covar[samples2use,,drop = FALSE]
-tmp_covar = tmp_covar[,colSums(tmp_covar) > 0,drop = FALSE]
+   samples2use = which(!is.na(pheno_rz[,pheno_name]))
 
-perms = qtl2::scan1perm(genoprobs = probs, 
-                        pheno   = pheno, 
-                        kinship = K, 
-                        addcovar = addcovar, 
-                        cores = 10,
-                        n_perm = 1000,
-                        quiet = FALSE)
-saveRDS(perms, file = file.path(result_dir, "perms.rds"))
+   print(paste0(pheno_name, " : ", length(samples2use)))
+
+   tmpK = K
+   for(j in 1:length(K)) {
+     tmpK[[j]] = K[[j]][samples2use, samples2use]
+   }
+   tmp_covar = addcovar[samples2use,,drop = FALSE]
+   tmp_covar = tmp_covar[,colSums(tmp_covar) > 0,drop = FALSE]
+
+
+   perms = qtl2::scan1perm(genoprobs = probs[samples2use,], 
+                           pheno     = pheno[samples2use, pheno_name, drop = FALSE], 
+                           kinship   = tmpK, 
+                           addcovar  = tmp_covar, 
+                           cores     = 10,
+                           n_perm    = 1000,
+                           quiet     = FALSE)
+   saveRDS(perms, file = perm_file)
+   
+   rm(tmpK, tmp_covar, samples2use, pheno_name)
+
+} # else
 
 
 ####################
@@ -184,7 +203,56 @@ dev.off()
 
 
 ####################
-# Create QTL heatmap
+# Map PC1 of cxcl1, cxcl2, cxcl5, tnf, il10, s100a8.
+pheno_ss = pheno_mat[rowMeans(is.na(pheno_mat)) < 1, c("cxcl1", "cxcl2", "cxcl5", "tnf", "s100a8")]
+rn = rownames(pheno_ss)
+pheno_ss = apply(pheno_ss, 2, scale)
+rownames(pheno_ss) = rn
+pheno_pc = pcaMethods::pca(pheno_ss, method = 'svdImpute', nPcs = ncol(pheno_ss))
+pcs = pcaMethods::scores(pheno_pc)
+
+lod_pc = qtl2::scan1(genoprobs = probs, 
+                     pheno     = pcs, 
+                     kinship   = K, 
+                     addcovar  = addcovar, 
+                     cores     = 4)
+qtl2::plot_scan1(lod_pc, map = map, lodcolumn = 'PC1', main = "PC1")
+
+curr_chr = 15
+coef_pc1 = qtl2::scan1blup(genoprobs = probs[, curr_chr], 
+                           pheno     = pcs[,'PC1', drop = FALSE], 
+                           kinship   = K[[curr_chr]], 
+                           addcovar  = addcovar,
+                           se = TRUE,
+                           cores = 4)
+
+plot_coefCC(coef_pc1, map, scan1_output = lod_pc, top_panel_prop = 0.6, main = 'PC1')
+
+curr_chr = 'X'
+coef_pc1_chrx = qtl2::scan1blup(genoprobs = probs[, curr_chr], 
+                           pheno     = pcs[,'PC1', drop = FALSE], 
+                           kinship   = K[[curr_chr]], 
+                           addcovar  = addcovar,
+                           se = TRUE,
+                           cores = 4)
+
+plot_coefCC(coef_pc1_chrx, map, scan1_output = lod_pc, top_panel_prop = 0.6, main = 'PC1')
+
+peaks = find_peaks(lod_pc, map = map, threshold = 9, prob = 0.95)
+
+start = peaks$ci_lo[1]
+end   = peaks$ci_hi[1]
+
+assoc_chrx = scan1snps(genoprobs = probs[,curr_chr], pheno = pcs[,'PC1', drop = FALSE], kinship = K[[curr_chr]], addcovar = addcovar,
+                        map = map, chr = curr_chr, start = max(1, start - 1), end = end + 1, query_func = snp_func, 
+                        keep_all_snps = TRUE, cores = 10)
+
+genes = gene_func(chr = curr_chr, start = start - 1, end = end + 1)
+plot_snpasso(scan1output = assoc_chrx$lod, snpinfo = assoc_chrx$snpinfo, genes = genes, drop_hilit = 1, 
+             top_panel_prop = 0.3, main = 'PC1', colors = 'black')
+
+####################
+# Create QTL heatmap.
 rdata_files = dir(result_dir, pattern = 'Rdata$')
 qtl = NULL
 

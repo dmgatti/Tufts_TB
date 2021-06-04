@@ -1,0 +1,86 @@
+---
+title: "Genotypes in Regions of Interest"
+author: "Daniel Gatti"
+date: "6/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(AnnotationHub)
+library(qtl2)
+library(tidyverse)
+
+
+base_dir = '/media/dmgatti/hdb/projects/TB'
+input_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata')
+out_dir = file.path(base_dir, 'results', 'genotypes_at_genes')
+
+# GTF Ensembl 92
+ensembl = AnnotationHub()[['AH61170']]
+```
+
+Request from Gillain
+
+S100A8/A9
+
+Chr 3 QTL ~90 mbp
+Chr 3 QTL ~90 mbp
+
+Receptors for S100A8 dimer (aka calgranulin A)
+
+Seems unknown – or not yet found by me
+
+
+Receptors for S100A9 dimer (aka calgranulin B)
+
+Seems unknown – or not yet found by me
+
+Receptors for S100A8/A9 heterodimer (aka calprotectin)
+
+Tlr4 @ Chr4:66827551-66846581 (+)
+
+Tlr4-interactor @ Chr6:53815468-53820825 (-)
+
+RAGE (aka AGER) @ Chr17:34597862-34600936 (+)
+
+```{r read_input}
+load(input_file)
+```
+
+Get locations of S100A
+
+```{r get_gene_locations}
+genes = subset(ensembl, gene_name %in% c('S100a8', 'S100a9', 'Tlr4', 'Tril', 'Ager'))
+genes = subset(genes, type == 'gene')
+
+n_samples = nrow(probs[[1]])
+n_founders = ncol(probs[[1]])
+# For each gene, estimate the number of founder alleles.
+local_probs = array(0, dim = c(n_samples, n_founders, length(genes)), 
+                    dimnames = list(rownames(probs[[1]]), colnames(probs[[1]]), genes$gene_name))
+
+for(i in seq_along(genes)) {
+  
+  chr = as.character(seqnames(genes)[i])
+  pos = start(genes)[i] / 1e6
+  mkr = find_marker(map, chr = chr, pos = pos)
+  pr  = round(2 * probs[[chr]][,,mkr], digits = 0)
+  local_probs[,,i] = pr
+  
+} # for(i)
+saveRDS(local_probs, file = file.path(out_dir, 's100a8_genes_haplotype.rds'))
+```
+
+
+```{r write_csv_files}
+for(i in 1:dim(local_probs)[[3]]) {
+  tmp = local_probs[,c('F', 'G'), i]
+  tmp = tibble(mouse = rownames(local_probs),
+               CAST  = tmp[,'F'],
+               PWK   = tmp[,'G']) %>% 
+        filter(CAST != 0 | PWK != 0)
+  write_csv(tmp, file = file.path(out_dir, paste0(dimnames(local_probs)[[3]][i], '_haplotypes.csv')))
+} # for(i)
+```
+

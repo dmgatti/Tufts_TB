@@ -7,17 +7,24 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-options(stringsAsFactos = FALSE)
+options(stringsAsFactors = FALSE)
 library(mogene20stmmentrezgprobe)
 library(mogene20stmmentrezg.db)
 library(Biostrings)
 library(VariantAnnotation)
+library(AnnotationHub)
+library(oligo)
 
 affy_dir        = '/media/dmgatti/hda/data/affymetrix'
 affy_probe_file = file.path(affy_dir, 'MoGene-2_0-st-v1.mm10.probe.tab')
+affy_trans_file = file.path(affy_dir, 'MoGene-2_0-st-v1-na36-mm10-transcript-csv', 'MoGene-2_0-st-v1.na36.mm10.transcript.csv')
+cel_dir         = '/media/dmgatti/hdb/projects/TB/data/expression/cel_files/analysis/raw'
+results_dir     = '/media/dmgatti/hdb/projects/TB/data/expression/cel_files/analysis/'
 ensembl_dir     = '/media/dmgatti/hda/data/ensembl/rel78/cdna'
 sanger_dir      = '/media/dmgatti/hda/data/Sanger/REL-1807-SNPs_Indels'
 sanger_file     = file.path(sanger_dir, 'mgp.v6.merged.norm.snp.indels.sfiltered.vcf.gz')
+hub             = AnnotationHub()
+ensembl         = hub[['AH28616']]  # Ensembl 78 GTF
 ```
 
 **Genome and ensembl builds**
@@ -27,7 +34,8 @@ Sanger says that the mouse annotation uses Ensembl 78 and GRCm38. See <ftp://ftp
 Read in the probe sequences.
 
 ```{r read_probes_seq}
-probes = read.delim(affy_probe_file)
+probes      = read.delim(affy_probe_file)
+transcripts = read.csv(affy_trans_file, comment.char = '#')
 ```
 
 Nubmer of probes and columns.
@@ -64,7 +72,13 @@ get_snps = function(vcf_file, chr, start, end) {
     
 } # get_snps()
 
-for(i in 1:nrow(probes)) {
+# Get the probes on chromosomes.
+chr_probes = which(startsWith(probes$seqname, 'chr') & !endsWith(probes$seqname, 'random'))
+
+# Remove the 'chr' at the start of the seqnames in probes.
+probes$seqname = sub('^chr', '', probes$seqname)
+
+for(i in chr_probes) {
   get_snps(sanger_file, probes$seqname[i], probes$start[i], probes$stop[i])
 }
 
@@ -77,3 +91,133 @@ vcf_file = sanger_file; chr = probes$seqname[i]; start = probes$start[i]; end = 
 hdr = VariantAnnotation::scanVcfHeader(sanger_file)
 ```
 
+
+```{r check_tmem9_igfn}
+# Look for probes in the exons of Tmrm9 or Igfn1.
+tmem9 = subset(ensembl, type == 'exon' & gene_name == 'Tmem9')
+tmem9 = keepStandardChromosomes(tmem9)
+igfn1 = subset(ensembl, type == 'exon' & gene_name == 'Igfn1')
+igfn1 = keepStandardChromosomes(igfn1)
+
+probes_gr = GRanges(seqnames = probes$seqname, ranges = IRanges(start = probes$start, end = probes$stop),
+                    strand = probes$strand, Probe.ID = probes$Probe.ID, Transcript.Cluster.ID = probes$Transcript.Cluster.ID,
+                    probe.sequence = probes$probe.sequence)
+probes_gr = keepStandardChromosomes(probes_gr, pruning.mode = 'coarse')
+
+# Tmem9 probes.
+ol = findOverlaps(tmem9, probes_gr)
+tmem9_probes = data.frame(as.data.frame(tmem9[queryHits(ol)]), as.data.frame(probes_gr[subjectHits(ol)]))
+tmem9_probes = tmem9_probes[,c('seqnames', 'start', 'end', 'strand', 'gene_id', 'gene_name', 'gene_biotype', 
+                               'exon_number', 'exon_id', 'transcript_id', 'transcript_name', 'transcript_biotype',
+                               'protein_id', 'seqnames.1', 'start.1', 'end.1', 'width.1', 'strand.1', 'Probe.ID',
+                               'Transcript.Cluster.ID', 'probe.sequence')]
+
+# Igfn1 probes.
+ol = findOverlaps(igfn1, probes_gr)
+igfn1_probes = data.frame(as.data.frame(igfn1[queryHits(ol)]), as.data.frame(probes_gr[subjectHits(ol)]))
+igfn1_probes = igfn1_probes[,c('seqnames', 'start', 'end', 'strand', 'gene_id', 'gene_name', 'gene_biotype', 
+                               'exon_number', 'exon_id', 'transcript_id', 'transcript_name', 'transcript_biotype',
+                               'protein_id', 'seqnames.1', 'start.1', 'end.1', 'width.1', 'strand.1', 'Probe.ID',
+                               'Transcript.Cluster.ID', 'probe.sequence')]
+
+```
+
+
+
+```{r read_affy}
+cel_files = dir(cel_dir, pattern = 'CEL$', full.names = TRUE)
+data = read.celfiles(cel_files)
+fit1 = fitProbeLevelModel(data)
+
+```
+
+```{r}
+NUSE(fit1)
+```
+
+```{r}
+eset = rma(data)
+```
+
+Match transcripts to eset.
+
+```{r merge_transcript_data}
+# Are all of the transcript IDs in the expression data in the transcript annotation?
+all(rownames(exprs(eset)) %in% transcripts$transcript_cluster_id)
+
+# Clean up the annotation.
+rownames(transcripts) = transcripts$transcript_cluster_id
+
+ga = strsplit(transcripts$gene_assignment, split = ' /// ')
+ga = lapply(ga, strsplit, split = ' // ')
+ga = lapply(ga, unlist)
+ga = lapply(ga, matrix, ncol = 5, byrow = TRUE, dimnames = list(NULL, c('id', 'symbol', 'name', 'unk1', 'entrez')))
+ga = lapply(ga, function(z) { z[grep('^ENS', z),,drop = FALSE] })
+
+ensid   = rep('', nrow(transcripts))
+symbol  = rep('', nrow(transcripts))
+name    = rep('', nrow(transcripts))
+
+for(i in 1:length(ga)) {
+  print(i)
+  m = match(ga[[i]][,'id'], ensembl$transcript_id)
+  
+  if(length(m) > 0) {
+
+    gene = unique(ensembl$gene_id[m])
+
+    if(length(gene) > 1) {
+      
+      gene = sort(table(ensembl$gene_id[m]), decreasing = TRUE)[1]
+      ensid[i]  = gene
+      symbol[i] = sort(table(ga[[i]][,'symbol']))[1]
+      name[i]   = sort(table(ga[[i]][,'name']))[1]
+            
+    } else {
+
+      ensid[i]  = gene
+      symbol[i] = ga[[i]][1,'symbol']
+      name[i]   = ga[[i]][1,'name']
+
+    } # else
+  } # for(i)
+
+} # for(i)
+
+transcripts$ensembl = ensid
+transcripts$symbol  = symbol
+transcripts$name    = name
+
+featureData(eset) = AnnotatedDataFrame(transcripts)
+
+```
+
+Rename samples.
+The BU core found that samples 296 & 299 were swapped.
+
+```{r rename_samples}
+sn = sampleNames(eset)
+sn[sn == '2017_GB_A8_296.CEL'] = 'tmp'
+sn[sn == '2017_GB_B1_299.CEL'] = '2017_GB_A8_296.CEL'
+sn[sn == 'tmp'] = '2017_GB_B1_299.CEL'
+sampleNames(eset) = sn
+```
+
+Write out normalized expression data.
+
+```{r write_expr_data}
+out_df = data.frame(as(featureData(eset), 'data.frame'), exprs(eset))
+rownames(out_df) = transcripts$transcript_cluster_id
+write.csv(out_df, file = file.path(results_dir, 'tufts_expr_rma.csv'))
+rm(out_df)
+```
+
+See if Tmem9 and Igfn1 have any signal.
+
+```{r}
+pr_expr = assayData(data)$exprs
+tmem9_expr = pr_expr[unique(as.character(tmem9_probes$Probe.ID)),]
+igfn1_expr = pr_expr[unique(as.character(igfn1_probes$Probe.ID)),]
+```
+
+They don't. :-(

@@ -15,10 +15,9 @@ library(qtl2convert)
 
 base_dir = '/media/dmgatti/hdb/projects/TB'
 pheno_file  = file.path(base_dir, 'data', 'phenotypes', 'tufts_do_tb_pheno_cleaned.csv')
-fda_pheno_file = '/media/dmgatti/hdb/projects/USFDA/data/phenotypes/fda_pheno_cleaned.csv'
-image_file  = file.path(base_dir, 'data', 'image_measurements.xlsx')
+#fda_pheno_file = '/media/dmgatti/hdb/projects/USFDA/data/phenotypes/fda_pheno_cleaned.csv'
 probs_file  = file.path(base_dir, 'haplo_reconstr', 'tufts_do_alleleprobs_cleaned.rds')
-fda_probs_file = '/media/dmgatti/hdb/projects/USFDA/haplo_reconstr/haps/fda_do_alleleprobs_qc_filtered.rds'
+#fda_probs_file = '/media/dmgatti/hdb/projects/USFDA/haplo_reconstr/haps/fda_do_alleleprobs_qc_filtered.rds'
 marker_file = file.path(base_dir, 'haplo_reconstr', 'qtl2', 'pmap.csv')
 output_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata')
 ```
@@ -26,12 +25,12 @@ output_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata')
 Load in phenotypes, genoprobs & markers. Markers are from U. Wisc. coordinates.
 
 ```{r read_data}
-pheno     = readr::read_csv(pheno_file)
-fda_pheno = readr::read_csv(fda_pheno_file)
-img_data  = read_xlsx(path = image_file)
-colnames(img_data) = c('mouse', 'prSS', 'necr')
+pheno     = readr::read_csv(pheno_file) %>% 
+              mutate(mouse = as.character(mouse))
+#fda_pheno = readr::read_csv(fda_pheno_file)
+
 probs     = readRDS(probs_file)
-fda_probs = readRDS(fda_probs_file)
+#fda_probs = readRDS(fda_probs_file)
 markers   = readr::read_csv(marker_file, col_types = 'ccn')
 ```
 
@@ -40,8 +39,6 @@ Align samples between pheno and probs.
 ```{r align_samples}
 # Keep only DO mice dosed with TB.
 pheno = filter(pheno, strain == 'J:DO' & mtb_dose > 0)
-
-pheno = full_join(pheno, img_data)
 
 # Align samples between phenotypes and probs.
 samples = intersect(pheno$mouse, rownames(probs[[1]]))
@@ -57,22 +54,22 @@ stopifnot(all(rownames(pheno) == rownames(probs[[1]])))
 
 There are `r nrow(pheno)` samples in common between the phenotypes and genoprobs.
 
-Combine the FDA mouse number, dose and survival data for non-vaccinted mice with the Tufts data.
+Combine the FDA mouse number, dose and survival data for non-vaccinated mice with the Tufts data.
 
 ```{r merge_fda_tufts}
-fda_pheno = fda_pheno %>%
-              filter(vacc == 'N') %>%
-              select(mouse = sample, gen, sex, vacc, dose, survival, cause, lung_mtb)
-fda_pheno = as.data.frame(fda_pheno)
-rownames(fda_pheno) = fda_pheno$mouse
-common = intersect(fda_pheno$mouse, rownames(fda_probs[[1]]))
+#fda_pheno = fda_pheno %>%
+#              filter(vacc == 'N') %>%
+#              select(mouse = sample, gen, sex, vacc, dose, survival, cause, lung_mtb)
+#fda_pheno = as.data.frame(fda_pheno)
+#rownames(fda_pheno) = fda_pheno$mouse
+#common = intersect(fda_pheno$mouse, rownames(fda_probs[[1]]))
 
-fda_pheno = fda_pheno[common,]
-fda_probs = fda_probs[common,]
+#fda_pheno = fda_pheno[common,]
+#fda_probs = fda_probs[common,]
 
-pheno = full_join(pheno, fda_pheno)
-names(fda_probs) = sub('^chr', '', fda_probs)
-probs = rbind(probs, fda_probs)
+#pheno = full_join(pheno, fda_pheno)
+#names(fda_probs) = sub('^chr', '', fda_probs)
+#probs = rbind(probs, fda_probs)
 ```
 
 
@@ -81,7 +78,7 @@ Separate phenotypes from covariates.
 ```{r make_pheno_covar}
 covar = select(pheno, mouse:euth)
 rownames(covar) = covar$mouse
-pheno = select(pheno, mouse, pct_wt_loss:resistin, necr)
+pheno = select(pheno, mouse, pct_wt_loss:necr_ratio)
 ```
 
 RankZ transform the phenotypes.
@@ -93,14 +90,14 @@ rankZ = function(x) {
 
 rownames(pheno) = pheno$mouse
 pheno = as.matrix(pheno[,-1])
-pheno = apply(pheno, 2, rankZ)
+pheno_rz = apply(pheno, 2, rankZ)
 ```
 
 Turn covariates into factors. I'm not sure about Mtb_dose yet. Last time, adding it as a factor was better than adding it as a numeric covariate.
 
 ```{r covar_factor}
 covar$gen  = factor(covar$gen)
-covar$expr = factor(covar$expr)
+covar$expt = factor(covar$expt)
 covar$cage = factor(covar$cage)
 covar$aero_run = factor(covar$aero_run)
 covar$euth = factor(covar$euth)
@@ -130,23 +127,13 @@ Create kinship matrices.
 
 ```{r make_kinship}
 K = calc_kinship(probs, type = 'loco', cores = 4)
+map = map[c(1:19, 'X')]
 ```
 
 Save large Rdata file.
 
 ```{r save_data}
-save(pheno, covar, map, probs, K, file = output_file)
+save(pheno, pheno_rz, covar, map, probs, K, file = output_file)
 ```
-
-
-
-
-
-
-
-
-
-
-
 
 

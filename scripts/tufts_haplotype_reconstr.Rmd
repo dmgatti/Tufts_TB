@@ -17,12 +17,12 @@ library(qtl2convert)
 
 base_dir = "/media/dmgatti/hdb/projects/TB/"
 geno_dir = paste0(base_dir, "data/genotypes/")
-hap_dir = paste0(base_dir, "haplo_reconstr/")
+hap_dir  = paste0(base_dir, "haplo_reconstr/")
 gigamuga_url = 'https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/gm_uwisc_v1.csv'
 muga_dir = '/media/dmgatti/hda/data/MUGA/'
 ```
 
-NOTE: Some of the genotypes were downloaded from dodb.jax.org. Theses are from files that are at JAX. We have the Geneseek files for more recently genotyped samples.
+NOTE: Some of the genotypes were downloaded from dodb.jax.org. These are from files that are at JAX. We have the Geneseek files for more recently genotyped samples.
 
 Karl Broman at Univ. of Wisconsin [https://kbroman.org/MUGAarrays/new_annotations.html](remapped the GigaMUGA markers) and has produced a new  [https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/mini_uwisc_v1.csv](marker annotation file).
 
@@ -52,7 +52,7 @@ all(rownames(markers) %in% rownames(snps))
 Load in the Geneseek data that we have.
 
 ```{r gather_geno}
-data_dirs = dir(geno_dir, pattern = '^Tufts', full.names = TRUE)
+data_dirs = dir(geno_dir, pattern = '^Tufts_', full.names = TRUE)
 data_dirs = data_dirs[-grep('csv|rds', data_dirs)]
 
 # Variables for genotypes and samples.
@@ -87,8 +87,8 @@ geno2 = readr::read_csv(str_c(geno_dir, 'complete_Beamer-Tufts_Beamer/Beamer-Tuf
 # Change allele calls to A, C, G, T, H, N.
 geno2 = geno2 %>%
           select(-chr, -pos) %>%
-          gather(sample, call, -marker) %>%
-          mutate(sample = str_c('g2_', sample)) %>%
+          pivot_longer(cols = -marker, names_to = 'sample', values_to = 'call') %>%
+          mutate(sample = str_c('jax_', sample)) %>%
           mutate(call = str_replace(call, 'AA', 'A'),
                  call = str_replace(call, 'CC', 'C'),
                  call = str_replace(call, 'GG', 'G'),
@@ -108,23 +108,26 @@ colnames(extra)[1:3] = c('marker', 'chr', 'pos')
 
 extra = extra %>%
           select(-chr, -pos) %>%
-          gather(sample, call, -marker) %>%
-          mutate(sample = str_c('g3_', sample))
+          pivot_longer(cols = -marker, names_to = 'sample', values_to = 'call') %>%
+          mutate(sample = str_c('unc_', sample))
 ```
 
-Merge the samples. There will be some duplicates, but I want to see how they turn out. I added 'g1', 'g2' & 'g3' to each of the groups.
+Merge the samples. There will be some duplicates, but I want to see how they turn out. I added 'neo', 'jax' & 'unc' to each of the groups.
 
 ```{r}
 g_tmp =  geno %>%
           as.data.frame() %>%
-          select(-chr, -pos, -cM, -A1, -A2) %>%
-          gather(sample, call, -marker) %>%
-          mutate(sample = str_c('g1_', sample))
+          select(-chr, -pos, -cM, -A1, -A2) %>% 
+          pivot_longer(cols = -marker, names_to = 'sample', values_to = 'call') %>%
+          mutate(sample = str_c('neo_', sample))
 
 g = full_join(g_tmp, geno2)
+rm(g_tmp, geno2)
 g = full_join(g, extra)
+rm(extra)
 g = g %>%
-      spread(sample, call)
+      pivot_wider(names_from = sample, values_from = call)
+gc()
 ```
 
 Check whether we have ~143000 rows.
@@ -136,6 +139,7 @@ dim(g)
 Filter genotypes based on no-call rate of 10%.
 
 ```{r}
+g = as.data.frame(g)
 rownames(g) = g$marker
 g = as.matrix(g[,-1])
 call_rate = colMeans(g == 'N', na.rm = TRUE)
@@ -160,8 +164,11 @@ Fix some of the sample IDs.
 
 ```{r fix_sample_ids}
 colnames(g) = sub('3_2$',  '23', colnames(g))
-colnames(g) = sub('32_2$', '33', colnames(g))
+colnames(g) = sub('32_3$', '33', colnames(g))
 colnames(g) = sub('78_2$', '79', colnames(g))
+colnames(g) = sub('Tufts_GB(2)?_', '', colnames(g))
+colnames(g) = make.unique(colnames(g))
+
 ```
 
 Save the genotypes.
@@ -284,11 +291,12 @@ rm(tmp)
 ```
 
 ```{r make_pheno_covar}
-pheno = readr::read_csv(str_c(base_dir, 'data/phenotypes/tufts_do_tb_pheno_cleaned.csv'))
+pheno = readr::read_csv(file.path(base_dir, 'data/phenotypes/tufts_do_tb_pheno_cleaned.csv'))
 pheno = data.frame(pheno)
 rownames(pheno) = pheno$mouse
 pheno$gen = as.numeric(sub("^G", "", pheno$gen))
 colnames(pheno)[1] = 'id'
+pheno$id = as.character(pheno$id)
 
 # Map the genotype samples to the phenotype samples.
 samples = strsplit(colnames(g), '_')
@@ -296,26 +304,30 @@ samples = sapply(samples, function(z) { z[length(z)] })
 samples = sub('\\.[0-9]$', '', samples)
 samples = parse_number(samples)
 samples = data.frame(id = colnames(g), sample = samples)
+samples$sample[samples$id == 'jax_32_3'] = 33
+samples$id[samples$id == 'jax_32_3'] = 'jax_33'
+samples$sample = as.character(samples$sample)
 
-covar = data.frame(id = samples$id,
-                   sample = samples$sample,
-                   sex = 'F',
-                   gen = 1)
-m = match(covar$sample, pheno$id)
-m_wh = which(!is.na(m))
-covar$gen[m_wh] = pheno$gen[m[m_wh]]
-covar$gen[covar$sample %in% 249:253] = 21
-covar$gen[covar$sample %in% c(332, 333, 375, 404)] = 22
-covar$gen[covar$sample >= 504] = 23
+covar = data.frame(id     = samples$sample,
+                   sample = samples$id,
+                   sex    = 'F')             # All samples are female.
+#m = match(covar$sample, pheno$id)
+#m_wh = which(!is.na(m))
+#covar$gen[m_wh] = pheno$gen[m[m_wh]]
 
-pheno = data.frame(id = samples$id, junk = runif(nrow(samples)))
+covar = merge(covar, pheno[,c('id', 'gen')], by = 'id')
+colnames(covar) = c('sample', 'id', 'sex', 'gen')
+covar = covar[,c('id', 'sample', 'sex', 'gen')]
 
-write.csv(pheno, file = paste0(hap_dir, "qtl2/pheno.csv"), quote = FALSE, row.names = FALSE)
-write.csv(covar, file = paste0(hap_dir, "qtl2/covar.csv"), quote = TRUE,  row.names = FALSE)
+# Create fake phenotypes just for haplotype reconstruction.
+pheno = data.frame(id = covar$id, junk = runif(nrow(covar)))
+
+write.csv(pheno, file = file.path(hap_dir, "qtl2/pheno.csv"), quote = FALSE, row.names = FALSE)
+write.csv(covar, file = file.path(hap_dir, "qtl2/covar.csv"), quote = TRUE,  row.names = FALSE)
 ```
 
 ```{r cleanup}
-rm(pheno, comb_geno, covar, fgeno, g, GM_geno, markers, new_geno, sex, ug)
+rm(list = ls())
 gc()
 ```
 
@@ -327,14 +339,12 @@ gc()
 options(stringsAsFactors = FALSE)
 knitr::opts_chunk$set(echo = FALSE)
 library(knitr)
-library(argyle)
-library(tidyverse)
 library(qtl2)
 library(qtl2convert)
 
 base_dir = "/media/dmgatti/hdb/projects/TB/"
 geno_dir = paste0(base_dir, "data/genotypes/")
-hap_dir = paste0(base_dir, "haplo_reconstr/")
+hap_dir  = paste0(base_dir, "haplo_reconstr/")
 gigamuga_url = 'https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/gm_uwisc_v1.csv'
 muga_dir = '/media/dmgatti/hda/data/MUGA/'
 ```
@@ -347,7 +357,7 @@ cross = qtl2::read_cross2(file = paste0(hap_dir, "qtl2/tufts.json"), quiet = FAL
 
 ```{r estimate_haplotype_probs}
 # Run haplotype reconstruction.
-probs = qtl2:::calc_genoprob2(cross = cross, quiet = FALSE, cores = 2)
+probs = qtl2:::calc_genoprob2(cross = cross, quiet = FALSE)
 saveRDS(probs, file = paste0(hap_dir, "tufts_do_genoprobs.rds"))
 
 gc()

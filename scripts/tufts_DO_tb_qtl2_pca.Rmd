@@ -13,9 +13,15 @@ library(pcaMethods)
 library(corrplot)
 
 base_dir = "/media/dmgatti/hdb/projects/TB/"
-result_dir = str_c(base_dir, "results/qtl2/dose_as_factor/")
+result_dir = str_c(base_dir, "results/qtl2/pca_test/")
+final_result_dir = file.path(base_dir, 'results/qtl2/gen_factor2')
+input_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata')
 
-load(file = str_c(base_dir, "data/phenotypes/GB_Tufts_qtl2_input.Rdata"))
+load(input_file)
+map = map[c(1:19, 'X')]
+pheno    = pheno[,!colnames(pheno) %in% c('probSS', 'necr')]
+pheno_rz = pheno_rz[,!colnames(pheno_rz) %in% c('probSS', 'necr')]
+
 # CC SNP and gene database files (from Karl).
 ccsnpdb = "/media/dmgatti/hda/data/MUGA/cc_variants.sqlite"
 mgidb   = "/media/dmgatti/hda/data/MUGA/mouse_genes_mgi.sqlite"
@@ -26,32 +32,184 @@ ensembl = 93
 peaks = NULL
 ```
 
-Scale all of the phenotypes.
+## Test PC Methods
 
-```{r scale_pheno}
-pheno_scaled = as.matrix(pheno[,8:ncol(pheno)])
-for(i in 1:ncol(pheno_scaled)) {
-  pheno_scaled[,i] = scale(log1p(pheno_scaled[,i]))
-} # for(i)
+Get the available PCA methods.
+
+```{r get_pca_methods}
+methods = pcaMethods::listPcaMethods()
+# Some methods can't impute missing data.
+methods = c('nipals', 'bpca', 'ppca', 'svdImpute')
 ```
 
-Get PCs.
+For each method, run PCA, get the PCs, and run QTL mapping. Then we'll compare peak heights and assume that the method with the highest peaks is producing the most reliable PCA. Then we'll map the PCs from that method. 
+
+```{r map_pca}
+addcovar = model.matrix(~gen, data = covar)[,-1,drop = FALSE]
+
+for(m in methods) {
+  
+  print(m)
+  
+  pc_object = pca(pheno_rz, method = m, nPcs = ncol(pheno_rz) - 4)
+  
+  lod = qtl2::scan1(genoprobs = probs, 
+                    pheno     = scores(pc_object), 
+                    kinship   = K, 
+                    addcovar  = addcovar, 
+                    cores = 10)
+  
+  saveRDS(lod, file = file.path(result_dir, paste0(m, '_PCA_qtl2.rds')))
+  
+} # for(m)
+```
+
+Load in each set of LOD scores and get the peaks with LOD over 6.
+
+```{r find_test_peaks}
+files = dir(path = result_dir, pattern = '_PCA_qtl2.rds$')
+
+pca_result = NULL
+
+for(f in files) {
+  
+  lod = readRDS(file.path(result_dir, f))
+  m = strsplit(f, '_')[[1]]
+  peaks = find_peaks(lod, map, threshold = 6)
+  colnames(peaks)[1] = 'method'
+  peaks[,'method'] = m[1]
+  pca_result = rbind(pca_result, peaks)
+  
+} # for(f)
+```
+
+```{r}
+pca_result %>% 
+  ggplot() +
+    geom_boxplot(aes(method, lod))
+```
+
+```{r fig.width=10,fig.height=6}
+pca_result %>% 
+  filter(lodcolumn %in% str_c('PC', 1:5)) %>% 
+  ggplot() +
+    geom_point(aes(pos, lod, color = method)) +
+    facet_wrap(~chr, nrow = 1)
+
+```
+
+I'm not sure how to evaluate the results. Which ones are "true"? Chr 17 near the MHC locus. And I expected one PC to home in on Chr 3 with a high LOD for s100a8. 
+
+Maybe a better approach would be to get the complete (imputed) data for each method and map that. There are a few peaks that I believe (like Chr 3 & 17). The method that produces the highest LOD scores there might be the most reliable. This still feels ad hoc.
+
+```{r map_obs}
+for(m in methods) {
+  
+  print(m)
+  
+  pc_object = pca(pheno_rz, method = m, nPcs = ncol(pheno_rz) - 4)
+  
+  lod = qtl2::scan1(genoprobs = probs, 
+                    pheno     = completeObs(pc_object), 
+                    kinship   = K, 
+                    addcovar  = addcovar, 
+                    cores = 10)
+  
+  saveRDS(lod, file = file.path(result_dir, paste0(m, '_obs_qtl2.rds')))
+  
+} # for(m)
+```
+
+Load in each set of LOD scores and get the peaks with LOD over 7.
+
+```{r find_obs_peaks}
+files = dir(path = result_dir, pattern = '_obs_qtl2.rds$')
+
+pca_result = NULL
+
+for(f in files) {
+  
+  lod = readRDS(file.path(result_dir, f))
+  m = strsplit(f, '_')[[1]]
+  peaks = find_peaks(lod, map, threshold = 6)
+  colnames(peaks)[1] = 'method'
+  peaks[,'method'] = m[1]
+  pca_result = rbind(pca_result, peaks)
+  
+} # for(f)
+```
+
+
+```{r plot_obs_peaks,fig.width=10,fig.height=6}
+pca_result %>% 
+  filter(lodcolumn %in% c('lung_s100a8', 'serum_cxcl5', 'lung_cxcl5')) %>% 
+  ggplot() +
+    geom_point(aes(pos, lod, color = method)) +
+    facet_wrap(~chr, nrow = 1)
+```
+
+Svdimpute finds peaks that the other methods don't, but I don't know if these peaks are real or phantom. Ppca and bpca seem to find the peaks on Chr 3 and 5 well. Nipals finds the peaks, but with lower LOD scores. Also, bpca moves the Chr 5 peak over a bit from the other methods.
+
+Cxcl5 is located at 90.7 Mb on Chr 5 and s100a8 is on Chr 3 at 90.7 Mb. See if there is a difference in peak location for these peaks. I'm considering these to be "true positives" since the QTL peak is over the gene that codes for the protein.
+
+```{r cxcl5_locus}
+pca_result %>% 
+  filter(lodcolumn %in% c('serum_cxcl5') & chr == 5 |
+         lodcolumn %in% c('lung_s100a8') & chr == 3) %>% 
+  arrange(lodcolumn, chr, pos)
+```
+
+All methods get the correct location for s100a8. Bpca is the only method that gets the correct location for Cxcl5. 
+
+**I'm going to map the PCs from the bpca method.**
+
+```{r pca_test_cleanup}
+rm(pc_object, pca_result, peaks)
+gc()
+```
+
+
+## Run PCA QTL mapping
+
+Get bpca PCs.
 
 ```{r pca}
-pc_object = pca(pheno_scaled, nPcs = 10, method = "ppca")
+pc_object = pca(pheno_rz, nPcs = ncol(pheno_rz) - 2, method = "bpca")
 pheno_pc = scores(pc_object)
 ```
 
-Look at the correlation of each PC with the phenotypes.
+Plot the R^2 for each PC.
 
-```{r pc_pheno_cor}
-corrplot(corr = cor(pheno_pc, pheno_scaled, use = "pairwise"), method = "ellipse")
+```{r pca_rsq}
+plot(pc_object)
 ```
 
+Plot the percent variance explained for each PC.
+
+```{r pca_pct_var}
+pc_var = sDev(pc_object)^2
+plot(pc_var / sum(pc_var) * 100, las = 1, xlab = 'PC', ylab = '% var')
+```
+
+Look at the correlation between phenotypes.
+
+```{r pheno_corr,fig.width=10}
+corrplot.mixed(corr = cor(pheno_rz, use = "pairwise"), lower = 'number', upper = "ellipse", order = 'hclust')
+```
+
+We are measuring a lot of values that are positively correlated wtih each other.
+
+Look at the correlation of each PC with the phenotypes.
+
+```{r pca_pheno_cor}
+corrplot(corr = cor(pheno_pc, pheno_rz, use = "pairwise"), method = "ellipse", order = 'hclust')
+```
 
 Perform QTL mapping on PCs.
 
 ```{r pca_qtl}
+peaks = NULL
+
 for(i in 1:ncol(pheno_pc)) {
   
   pheno_name = colnames(pheno_pc)[i]
@@ -64,7 +222,7 @@ for(i in 1:ncol(pheno_pc)) {
   for(j in 1:length(K)) {
     tmpK[[j]] = K[[j]][samples2use, samples2use]
   }
-  tmp_covar = covar[samples2use,,drop = FALSE]
+  tmp_covar = addcovar[samples2use,,drop = FALSE]
   tmp_covar = tmp_covar[,colSums(tmp_covar) > 0, drop = FALSE]
 
   print("    QTL")  
@@ -74,7 +232,7 @@ for(i in 1:ncol(pheno_pc)) {
                     addcovar  = tmp_covar, 
                     cores = 10)
   
-  png(str_c(result_dir, pheno_name, "_qtl.png"), width = 1000, height = 800, res = 128)
+  png(file.path(final_result_dir, str_c(pheno_name, "_qtl.png")), width = 1000, height = 800, res = 128)
   qtl2::plot_scan1(lod, map = map, main = pheno_name)
   dev.off()
   
@@ -82,6 +240,7 @@ for(i in 1:ncol(pheno_pc)) {
   
   # If the confidence interval takes up more than 20 Mb, use the peak LOD +/- 5 Mb.
   if(nrow(current_peaks) > 0) {
+
     for(j in 1:nrow(current_peaks)) {
       if(current_peaks$ci_hi[j] - current_peaks$ci_lo[j]) {
         current_peaks$ci_hi[j] = current_peaks$pos[j] + 5
@@ -109,37 +268,149 @@ for(i in 1:ncol(pheno_pc)) {
                               kinship   = K[[curr_chr]], 
                               addcovar  = tmp_covar,
                               se = TRUE,
-                              cores = 10)
+                              cores = 4)
       stopifnot(!is.nan(coefs[[j]]))
     
-      png(str_c(result_dir, pheno_name, "_coef_chr", curr_chr, ".png"), width = 1000, height = 800, res = 128)
+      png(file.path(final_result_dir, str_c(pheno_name, "_coef_chr", curr_chr, ".png")), width = 1000, height = 800, res = 128)
       plot_coefCC(coefs[[j]], map, scan1_output = lod, top_panel_prop = 0.6, main = pheno_name)
       dev.off()
     
       print(paste("    assoc", j))
-      assocs[[j]] = scan1snps(genoprobs = probs[,curr_chr], pheno = pheno_pc[,pheno_name, drop = FALSE], kinship = tmpK[[curr_chr]], addcovar = tmp_covar,
-                              map = map, chr = curr_chr, start = start - 1, end = end + 1, query_func = snp_func, 
-                              keep_all_snps = TRUE, cores = 10)
+      assocs[[j]] = scan1snps(genoprobs = probs[,curr_chr], pheno = pheno_pc[,pheno_name, drop = FALSE], 
+                              kinship = tmpK[[curr_chr]], addcovar = tmp_covar,
+                              map = map, chr = curr_chr, start = start - 1, end = end + 1, 
+                              query_func = snp_func, keep_all_snps = TRUE, cores = 4)
       
       
     
       genes = gene_func(chr = curr_chr, start = start - 1, end = end + 1)
-      png(str_c(result_dir, pheno_name, "_assoc_chr", curr_chr, ".png"), width = 2400, height = 1600, res = 300)
-      plot_snpasso(scan1output = assocs[[j]]$lod, snpinfo = assocs[[j]]$snpinfo, genes = genes, drop_hilit = 1, top_panel_prop = 0.5, main = pheno_name)
+      png(file.path(final_result_dir, str_c(pheno_name, "_assoc_chr", curr_chr, ".png")), width = 4000, height = 3000, res = 300)
+      plot_snpasso(scan1output = assocs[[j]]$lod, snpinfo = assocs[[j]]$snpinfo, genes = genes, drop_hilit = 1, 
+                   top_panel_prop = 0.5, main = pheno_name, colors = 'black')
       dev.off()
     
       # Get the top SNPs.
       top = top_snps(assocs[[j]]$lod, assocs[[j]]$snpinfo)
-      write_csv(top, path = str_c(result_dir, pheno_name, "_assoc_chr", curr_chr, "_top_snps.csv"))
+      write_csv(top, path = file.path(result_dir, str_c(pheno_name, "_assoc_chr", curr_chr, "_top_snps.csv")))
 
     } # if(nrow(current_peaks > 0))
     
   } # for(j)
   
-  save(lod, coefs, assocs, file = str_c(result_dir, pheno_name, "_qtl2.Rdata"))
+  save(lod, coefs, assocs, file = file.path(final_result_dir, str_c(pheno_name, "_qtl2.Rdata")))
   
 } # for(i)
 
-write_csv(peaks, path = str_c(result_dir, "tb_qtl_peaks_pca.csv"))
+write_csv(peaks, path = file.path(final_result_dir, "tb_qtl_peaks_pca.csv"))
 ```
+
+Perform QTL mapping on PCs created from the phenotypes for the genetic mapping manuscript: Lung Cxcl1, Cxcl2, Cxcl5, S100a8, & Tnf.
+
+```{r pca_qtl_first_manuscript}
+peaks = NULL
+
+tmp_pheno = pheno_rz[,c('lung_cxcl1', 'lung_cxcl2', 'lung_cxcl5', 'lung_tnf', 'lung_s100a8')]
+tmp_pheno = tmp_pheno[rowMeans(is.na(tmp_pheno)) < 1,]
+pc_object = pca(tmp_pheno, nPcs = 5, method = "bpca")
+pheno_pc = scores(pc_object)
+
+# Load in perms.
+perms = readRDS(file.path(final_result_dir, 'perms.rds'))
+thr = summary(perms, alpha = 0.05)
+
+for(i in 1:ncol(pheno_pc)) {
+  
+  pheno_name = colnames(pheno_pc)[i]
+  
+  samples2use = which(!is.na(pheno_pc)[,pheno_name])
+  
+  print(str_c(pheno_name, " : ", length(samples2use)))
+  
+  tmpK = K
+  for(j in 1:length(K)) {
+    tmpK[[j]] = K[[j]][samples2use, samples2use]
+  }
+  tmp_covar = addcovar[samples2use,,drop = FALSE]
+  tmp_covar = tmp_covar[,colSums(tmp_covar) > 0, drop = FALSE]
+
+  print("    QTL")  
+  lod = qtl2::scan1(genoprobs = probs[samples2use,], 
+                    pheno     = pheno_pc[samples2use, pheno_name, drop = FALSE], 
+                    kinship   = tmpK, 
+                    addcovar  = tmp_covar, 
+                    cores = 10)
+  
+  png(file.path(final_result_dir, str_c(pheno_name, "_subset_qtl.png")), width = 1000, height = 800, res = 128)
+  qtl2::plot_scan1(lod, map = map, main = pheno_name, ylim = c(0, 8))
+  add_threshold(map, thresholdA = thr, col = 'red')
+  dev.off()
+  
+  current_peaks = find_peaks(lod, map, threshold = 6, prob = 0.95)
+  
+  # If the confidence interval takes up more than 20 Mb, use the peak LOD +/- 5 Mb.
+  if(nrow(current_peaks) > 0) {
+
+    for(j in 1:nrow(current_peaks)) {
+      if(current_peaks$ci_hi[j] - current_peaks$ci_lo[j]) {
+        current_peaks$ci_hi[j] = current_peaks$pos[j] + 5
+        current_peaks$ci_lo[j] = max(current_peaks$pos[j] - 5, 3)  # This protects us from going off the beginning of the chr.
+      } # if(current_peaks$ci_hi[j] - current_peaks$ci_lo[j])
+    } # for(j)
+    
+    peaks = rbind(peaks, current_peaks)
+    
+    coefs = vector("list", nrow(current_peaks))
+    names(coefs) = current_peaks$chr
+    assocs = vector("list", nrow(current_peaks))
+    names(assocs) = current_peaks$chr
+  
+    for(j in 1:nrow(current_peaks)) {
+    
+      curr_chr = current_peaks$chr[j]
+      print(str_c("    chr ", curr_chr))
+      start = current_peaks$ci_lo[j]
+      end   = current_peaks$ci_hi[j]
+  
+      print(paste("    coef", j))
+      coefs[[j]] = qtl2::scan1blup(genoprobs = probs[samples2use, curr_chr], 
+                              pheno     = pheno_pc[samples2use, pheno_name, drop = FALSE], 
+                              kinship   = K[[curr_chr]], 
+                              addcovar  = tmp_covar,
+                              se = TRUE,
+                              cores = 4)
+      stopifnot(!is.nan(coefs[[j]]))
+    
+      png(file.path(final_result_dir, str_c(pheno_name, "_subset_coef_chr", curr_chr, ".png")), width = 1000, height = 800, res = 128)
+      plot_coefCC(coefs[[j]], map, scan1_output = lod, top_panel_prop = 0.6, main = pheno_name)
+      dev.off()
+    
+      print(paste("    assoc", j))
+      assocs[[j]] = scan1snps(genoprobs = probs[,curr_chr], pheno = pheno_pc[,pheno_name, drop = FALSE], 
+                              kinship = tmpK[[curr_chr]], addcovar = tmp_covar,
+                              map = map, chr = curr_chr, start = start - 1, end = end + 1, 
+                              query_func = snp_func, keep_all_snps = TRUE, cores = 4)
+      
+      
+    
+      genes = gene_func(chr = curr_chr, start = start - 1, end = end + 1)
+      png(file.path(final_result_dir, str_c(pheno_name, "_subset_assoc_chr", curr_chr, ".png")), width = 4000, height = 3000, res = 300)
+      plot_snpasso(scan1output = assocs[[j]]$lod, snpinfo = assocs[[j]]$snpinfo, genes = genes, drop_hilit = 1, 
+                   top_panel_prop = 0.5, main = pheno_name, colors = 'black')
+      dev.off()
+    
+      # Get the top SNPs.
+      top = top_snps(assocs[[j]]$lod, assocs[[j]]$snpinfo)
+      write_csv(top, path = file.path(result_dir, str_c(pheno_name, "_subset_assoc_chr", curr_chr, "_top_snps.csv")))
+
+    } # if(nrow(current_peaks > 0))
+    
+  } # for(j)
+  
+  save(lod, coefs, assocs, file = file.path(final_result_dir, str_c(pheno_name, "_subset_qtl2.Rdata")))
+  
+} # for(i)
+
+write_csv(peaks, path = file.path(final_result_dir, "tb_qtl_peaks_pca_subset.csv"))
+```
+
 
