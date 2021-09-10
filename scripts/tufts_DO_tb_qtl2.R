@@ -8,7 +8,7 @@ library(survival)
 library(tidyverse)
 library(qtl2)
 
-base_dir   = '/media/dmgatti/hdb/projects/TB'
+base_dir   = '/media/dmgatti/data0/Tufts/TB'
 input_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata') 
 result_dir = file.path(base_dir, 'results', 'qtl2', 'gen_factor2')
 
@@ -21,8 +21,8 @@ ensembl = useEnsembl(biomart = 'ensembl', dataset = 'mmusculus_gene_ensembl')
 load(input_file)
 
 # CC SNP and gene database files (from Karl).
-ccsnpdb = "/media/dmgatti/hda/data/MUGA/cc_variants.sqlite"
-mgidb   = "/media/dmgatti/hda/data/MUGA/mouse_genes_mgi.sqlite"
+ccsnpdb = "/media/dmgatti/data0/MUGA/cc_variants.sqlite"
+mgidb   = "/media/dmgatti/data0/MUGA/mouse_genes_mgi.sqlite"
 snp_func  = create_variant_query_func(dbfile = ccsnpdb)
 gene_func = create_gene_query_func(dbfile = mgidb)
 ensembl = 93
@@ -35,14 +35,17 @@ peaks = NULL
 addcovar = model.matrix(~gen, data = covar)[,-1,drop = FALSE]
 
 herit = data.frame(pheno = colnames(pheno_rz),
-                   herit = 0)
+                   herit = 0,
+                   herit_sd = 0)
 
-K_all = calc_kinship(probs, type = 'overall', cores = 4)
+K_all = calc_kinship(probs, type = 'overall', cores = 8)
 
 for(i in 1:ncol(pheno_rz)) {
   
-  herit$herit[i] = qtl2::est_herit(pheno = pheno_rz[,i,drop = FALSE], 
-                                   kinship = K_all, addcovar = addcovar)
+  tmp = qtl2::est_herit(pheno = pheno_rz[,i,drop = FALSE], 
+                        kinship = K_all, addcovar = addcovar)
+  herit$herit[i] = tmp
+  herit$herit_sd[i] = attr(tmp, 'resid_sd')
   
 } # for(i)
 
@@ -57,7 +60,7 @@ for(i in 1:ncol(pheno_rz)) {
   
   pheno_name = colnames(pheno_rz)[i]
   
-  samples2use = which(!is.na(pheno_rz[,pheno_name]))
+  samples2use = which(!is.na(pheno_rz[,pheno_name] & covar$map_lung == 'y'))
   
   print(str_c(pheno_name, " : ", length(samples2use)))
   
@@ -73,7 +76,7 @@ for(i in 1:ncol(pheno_rz)) {
                     pheno     = pheno_rz[samples2use, pheno_name, drop = FALSE], 
                     kinship   = tmpK, 
                     addcovar  = tmp_covar, 
-                    cores     = 10)
+                    cores     = 8)
   
   png(file.path(result_dir, str_c(pheno_name, "_qtl.png")), width = 1000, height = 800, res = 128)
   qtl2::plot_scan1(lod, map = map, main = pheno_name)
@@ -118,11 +121,11 @@ for(i in 1:ncol(pheno_rz)) {
                                    kinship   = K[[curr_chr]], 
                                    addcovar  = tmp_covar,
                                    se = TRUE,
-                                   cores = 5)
+                                   cores = 10)
       stopifnot(!is.nan(coefs[[j]]))
       
       png(file.path(result_dir, str_c(pheno_name, "_coef_chr", curr_chr, ".png")), width = 1000, height = 800, res = 128)
-      plot_coefCC(coefs[[j]], map, scan1_output = lod, top_panel_prop = 0.6, main = pheno_name)
+      plot_coefCC(coefs[[j]], map, scan1_output = lod, top_panel_prop = 0.6, main = pheno_name, col = CCorigcolors)
       dev.off()
       
       # Add the coefs to the peak table.
@@ -139,7 +142,8 @@ for(i in 1:ncol(pheno_rz)) {
       genes = gene_func(chr = curr_chr, start = start - 1, end = end + 1)
       png(file.path(result_dir, str_c(pheno_name, "_assoc_chr", curr_chr, ".png")), width = 2400, height = 1600, res = 300)
       plot_snpasso(scan1output = assocs[[j]]$lod, snpinfo = assocs[[j]]$snpinfo, genes = genes, drop_hilit = 1, 
-                   top_panel_prop = 0.3, main = pheno_name, colors = 'black')
+                   panel_prop = c(0.25, 0.25, 0.5), main = pheno_name, colors = 'black', show_all_snps = TRUE,
+                   sdp_panel = TRUE, strain_labels = names(CCorigcolors))
       dev.off()
       
       # Get the top SNPs.
@@ -167,6 +171,7 @@ write_csv(peaks, file = file.path(result_dir, "tb_qtl_peaks.csv"))
 pheno_surv = data.frame(mouse = as.character(covar$mouse),
                         surv = Surv(time = covar$euth_day, event = (covar$euth == 'y') * 1))
 rownames(pheno_surv) = pheno_surv$mouse
+pheno_surv = pheno_surv[covar$map_survival == 'y',]
 pheno_surv = pheno_surv[complete.cases(pheno_surv),]
 
 # Also try survival model with longer living mice censored at 60 days.
@@ -182,6 +187,7 @@ pheno_surv_60 = pheno_surv_60[complete.cases(pheno_surv_60),]
 
 samples = intersect(rownames(pheno_surv), rownames(addcovar))
 pheno_surv = pheno_surv[samples,]
+addcovar   = addcovar[samples,]
 probs = probs[samples,]
 for(i in seq_along(K)) {
   K[[i]] = K[[i]][samples,samples]

@@ -12,10 +12,10 @@ library(knitr)
 library(readxl)
 library(corrplot)
 library(GGally)
+library(ggrepel)
 library(tidyverse)
-base_dir = '/media/dmgatti/hdb/projects/TB'
-pheno_file = 'Beamer_TB_Phenotype_data_20201124.xlsx'
-image_file = 'image_measurements.csv'
+base_dir = '/media/dmgatti/data0/Tufts/TB'
+pheno_file = 'Beamer TB Phenotype data 2021-09-02.xlsx'
 ```
 
 # Initial Data Cleanup
@@ -25,25 +25,19 @@ I am focusing on phenotype cleanup for the DO mice to pass into the QTL mapping 
 Read in phenotype data.
 
 ```{r read_pheno}
-pheno = readxl::read_xlsx(file.path(base_dir, 'data', 'phenotypes', pheno_file), sheet = 'Batch & phenotype data', na = 'na')
-image = read_csv(file.path(base_dir, 'data', 'phenotypes', image_file))
+pheno = readxl::read_xlsx(file.path(base_dir, 'data', 'phenotypes', pheno_file), sheet = 'Expt & phenotype data', na = 'na')
 ```
 
 What are the data dimensions?
 
 ```{r pheno_dim}
 dim(pheno)
-dim(image)
 ```
 
 What are the column names?
 
 ```{r pheno_colnames}
 colnames(pheno)
-```
-
-```{r colnames_image}
-colnames(image)
 ```
 
 Make the column names shorter.
@@ -55,18 +49,22 @@ pheno = pheno %>%
           select(mouse       = `Mouse #`,
                  coat        = `Coat color`,
                  strain      = `Strain`,
-                 gen         = `DOB or generation`,
-                 expt        = `Experiment (Batch)`,
-                 mach_type   = `Type of aerosol machine`,
+                 gen         = `Generation`,
+                 expt        = `Experiment`,
+                 mach_type   = `Aerosol machine`,
                  gigamuga    = `GigaMUGA`,
-                 cage        = `Cage number`,
+                 ge_array    = `Lung Gene Expression (Microarray)`,
+                 slide_scan  = `Slide scanned`,
+                 cage        = `Cage #`,
                  aero_run    = `Aerosol run no`,
-                 mtb_dose    = `Mtb initial dose`,
-                 susc_class  = `Susceptibility Class`,
+                 mtb_dose    = `Mtb initial dose (average)`,
+                 susc_class  = `Class`,
                  il10_assay    = `IL-10 Assay Source`,
                  il12_assay    = `IL-12 Assay Source`,
-                 euth_day    = `Day of Euthanasia`,
-                 euth        = `Euthanized due to pulmonary TB`,
+                 euth_day     = `Day euth Post-Infection`,
+                 euth         = `Euth due to predetermined timepoint (y/n)`,
+                 map_survival = `QTL map survival (y/n)`,
+                 map_lung     = `QTL map lung traits (y/n)`,
                  pct_wt_loss = `% wt loss cf peak`,
                  mtb_burden  = `Lung Mtb burden`,
                  lung_cxcl5  = `Lung CXCL5 pg/ml`,
@@ -94,6 +92,9 @@ pheno = pheno %>%
                  lung_anti_mtb_cfp_igg = `Lung anti-M.tb CFP IgG \"ng/mL\"`,
                  lung_anti_crypto_igg  = `Lung anti-crypto IgG \"ng/mL\"`,
                  blood_esat6_ifng      = `Blood ESAT-6 specific IFNg pg/ml`,
+                 lung_prob_SS          = `Lung granuloma Probability of SS`,
+                 lung_necr_ratio       = `Lung granuloma Ratio of pyknotic necrosis to non-necrosis`,
+                 lung_stain            = `Lung stain`,
                  blood_esat6_tnf       = `Blood ESAT-6 specific TNF pg/ml`,
                  blood_esat6_il12p70   = `Blood ESAT-6 specific IL-12p40/p70 pg/ml`,
                  blood_esat6_il10      = `Blood ESAT-6 specific IL-10 pg/ml`,
@@ -120,16 +121,17 @@ pheno = pheno %>%
                  serum_anti_mtb_cw_igg = `Serum anti-M.tb CW IgG \"ng/mL\"`,
                  serum_anti_mtb_cfp_igg = `Serum anti-M.tb CFP IgG \"ng/mL\"`,
                  serum_anti_crypto_igg = `Serum anti-crypto IgG \"ng/mL\"`)
-
-colnames(image) = c('mouse', 'probSS', 'necr_ratio')
 ```
 
 Remove columns that are all NA. There are `r ncol(pheno)` columns before.
 
 ```{r remove_na}
+orig_pheno = pheno
+orig_pheno$mouse = as.character(orig_pheno$mouse)
+
 pheno = bind_cols(select(pheno, mouse:euth),
                   pheno %>% 
-                    select(pct_wt_loss:serum_anti_crypto_igg) %>% 
+                    select(pct_wt_loss:lung_necr_ratio, blood_esat6_tnf:serum_anti_crypto_igg) %>% 
                     mutate(across(.cols = where(is.character), .fns = parse_number)))
 
 pheno = pheno[,colMeans(is.na(pheno)) < 1.0]
@@ -137,10 +139,9 @@ pheno = pheno[,colMeans(is.na(pheno)) < 1.0]
 
 There are `r ncol(pheno)` columns after.
 
-Clean up data columns. Thomas said to keep the 3um slides when there are duplicates (i.e. 3um and 5um).
+Clean up data columns. 
 
 ```{r data_clean1}
-pheno$mouse[duplicated(pheno$mouse)] = '1091'
 pheno = pheno %>%
           mutate(mouse = as.character(mouse),
                  gen   = if_else(gen == 'na' | gen == 'NA', NA_character_, gen),
@@ -150,24 +151,8 @@ pheno = pheno %>%
                  euth      = if_else(str_detect(euth, '^n'), 'n', euth),
                  euth      = if_else(str_detect(euth, '^y'), 'y', euth)) %>% 
          filter(str_detect(mouse, '526', negate = TRUE))
-
-# Samples 586 & 587 are duplicated in this data.
-# Taking the mean of the two measurements.
-image = image %>%
-          filter(str_detect(mouse, '5um', negate = TRUE)) %>% 
-          mutate(mouse = as.character(mouse),
-                 mouse = str_replace(mouse, ';3um', ''),
-                 mouse = str_replace(mouse, '_2', '')) %>% 
-         group_by(mouse) %>% 
-         summarize(necr_ratio = mean(necr_ratio, na.rm = TRUE))
 ```
 
-Join the image an phenotype data together.
-
-```{r join_pheno_image}
-pheno = full_join(pheno, image, by = 'mouse') %>% 
-          distinct()
-```
 
 Make sure that there are no duplicated mouse IDs.
 
@@ -185,15 +170,15 @@ Keep only the DO mice.
 ```{r get_numeric_pheno}
 pheno = pheno %>%
            filter(strain == 'J:DO')
-pheno_num = select(pheno, where(is.numeric)) %>% 
-            select(-(cage:euth_day))
+pheno_num = select(pheno, mouse, where(is.numeric)) %>% 
+            select(-(cage:mtb_dose))
 ```
 
 How many missing (i.e. NA) data points are there in each column?
 
 ```{r missing_data}
 missing = pheno_num %>% 
-            pivot_longer(cols = everything(), names_to = 'phenotype') %>% 
+            pivot_longer(cols = pct_wt_loss:serum_anti_crypto_igg, names_to = 'phenotype') %>% 
             mutate(is_na = is.na(value)) %>% 
             group_by(phenotype) %>% 
             summarize(pct_na = mean(is_na) * 100.0,
@@ -204,7 +189,7 @@ kable(missing, digits = 3)
 Keep columns with > 300 samples.
 
 ```{r complete_data}
-columns2keep = c(colnames(pheno)[1:15], filter(missing, not_na >= 300) %>% pull(phenotype))
+columns2keep = c(colnames(pheno)[1:17], filter(missing, not_na >= 300) %>% pull(phenotype))
 pheno = pheno %>% 
           select(which(colnames(pheno) %in% columns2keep))
 ```
@@ -214,8 +199,7 @@ The sample size is very small for some phenotypes. 60 to 110 mice will be too sm
 ```{r missing_pattern,fig.height=8,fig.width=12}
 pheno_num %>%
   bind_cols(pull(pheno, mouse)) %>%
-  rename(mouse = `...50`) %>% 
-  pivot_longer(cols = pct_wt_loss:necr_ratio, names_to = 'phenotype', values_to = 'missing') %>%
+  pivot_longer(cols = pct_wt_loss:serum_anti_crypto_igg, names_to = 'phenotype', values_to = 'missing') %>%
   mutate(missing = is.na(missing),
          missing = factor(missing, levels = c(TRUE, FALSE))) %>%
   ggplot() +
@@ -233,8 +217,8 @@ Here, I look at the distribution of each phenotype to determine if it will requi
 Look at the range of data in each column.
 
 ```{r pheno_range}
-pheno %>% 
-  select(pct_wt_loss:necr_ratio) %>% 
+pheno_num %>% 
+  select(euth_day, pct_wt_loss:serum_anti_crypto_igg) %>% 
   rename_all(str_replace_all, pattern = '_', replacement = '.') %>%
   summarise_all(list(min, max, mean, median), na.rm = TRUE) %>%
   pivot_longer(cols = everything(), names_to = 'phenotype', values_to = 'value') %>%
@@ -253,8 +237,8 @@ Some phenotypes have values of 0, which means that we will have to add one befor
 Initial boxplot of log+1 transformed values.
 
 ```{r pheno_boxplot, fig.width=12}
-pheno %>% 
-  select(pct_wt_loss:necr_ratio) %>% 
+pheno_num %>% 
+  select(euth_day, pct_wt_loss:serum_anti_crypto_igg) %>% 
   pivot_longer(cols = everything(), names_to = 'phenotype', values_to = 'value') %>%
   mutate(value = log1p(value)) %>%
   ggplot(aes(phenotype, value)) +
@@ -268,54 +252,39 @@ Most of these look good. A few have zero values when all of the other mice have 
 Standardize the phenotypes and look for outliers that are +/- 4 std. dev. from the mean.
 
 ```{r pheno_std_boxplot,fig.height=8}
-pheno %>% 
-  select(pct_wt_loss:necr_ratio) %>%  
-  pivot_longer(cols = everything(), names_to = 'phenotype', values_to = 'value') %>%
-  group_by(phenotype) %>%
-  mutate(value = log1p(value),
-         value = if_else(phenotype == 'necr_ratio', expm1(value), value),
-         value = if_else(phenotype == 'necr_ratio', log(value + 1e-4), value),
-         value = scale(value)) %>%
+tmp = pheno %>% 
+        select(mouse, pct_wt_loss:serum_cxcl1) %>%  
+        pivot_longer(cols = pct_wt_loss:serum_cxcl1, names_to = 'phenotype', values_to = 'value') %>%
+        group_by(phenotype) %>%
+        mutate(value = log1p(value),
+               value = if_else(phenotype == 'lung_necr_ratio', expm1(value), value),
+               value = if_else(phenotype == 'lung_necr_ratio', log(value + 1e-4), value),
+               value = scale(value))
+outliers = tmp %>% 
+             filter(abs(value) > 4)
+tmp %>%
   ggplot(aes(phenotype, value)) +
     geom_boxplot() +
     geom_hline(aes(yintercept = 4),  color = 'red') +
     geom_hline(aes(yintercept = -4), color = 'red') +
+    geom_text_repel(mapping = aes(phenotype, value, label = mouse), data = outliers, color = 'red') +
     coord_flip()
 ```
 
-There is one low lung Cxcl5 value. Which sample is it?
+Serum Cxc.2 and lung_prob_ss have skewed distributions. 
 
-```{r min_vegf}
-pheno %>% 
-  top_n(-1, lung_cxcl5)
-```
-It looks like this mouse died before infection. It has not mtb_dose, so it won't be used in mapping.
-
-There is one low serum Cxcl5 value. Which sample is it?
-
-```{r min_vegf}
-pheno %>% 
-  top_n(-1, serum_cxcl5)
-```
-
-The Cxcl5 value is 0. I'm not sure that I believe that. Setting to NA.
-
-```{r serum_cxcl5_0}
-pheno = pheno %>% 
-          mutate(serum_cxcl5 = if_else(serum_cxcl5 < 1e-8, NA_real_, serum_cxcl5))
-```
-
+There are a handfull of outliers.
 
 Look at a violin plot of the data as well. This allows me to see if there are multi-modal distributions that the boxplot hides.
 
 ```{r pheno_std_violin,fig.width=8}
 pheno %>% 
-  select(pct_wt_loss:necr_ratio) %>%  
+  select(pct_wt_loss:serum_cxcl1) %>%  
   pivot_longer(cols = everything(), names_to = 'phenotype', values_to = 'value') %>%
   group_by(phenotype) %>%
   mutate(value = log1p(value),
-         value = if_else(phenotype == 'necr_ratio', expm1(value), value),
-         value = if_else(phenotype == 'necr_ratio', log(value + 1e-4), value),
+         value = if_else(phenotype == 'lung_necr_ratio', expm1(value), value),
+         value = if_else(phenotype == 'lung_necr_ratio', log(value + 1e-4), value),
          value = scale(value)) %>%
   ggplot(aes(phenotype, value)) +
     geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
@@ -324,12 +293,14 @@ pheno %>%
   coord_flip()
 ```
 
+Some of the distributions are multimodal. This is either good, because they will separate by genotype, or bad, because it indicates different technical effects.
+
 Look at the necrosis percentages by themselves.
 
 ```{r necr_hist}
 pheno %>% 
-  select(mouse, starts_with('necr')) %>% 
-  pivot_longer(starts_with('necr'), names_to = 'phenotype', values_to = 'value') %>% 
+  select(mouse, starts_with('lung_necr')) %>% 
+  pivot_longer(starts_with('lung_necr'), names_to = 'phenotype', values_to = 'value') %>% 
   ggplot() +
     geom_histogram(aes(value)) +
     scale_x_log10() +
@@ -343,8 +314,8 @@ Next, I plot each phenotype by sample ID, looking for odd trends over time. I wi
 
 ```{r pheno_time_series,fig.width=12,fig.height=10}
 pheno %>% 
-  select(mouse, mtb_dose, pct_wt_loss:necr_ratio) %>% 
-  pivot_longer(cols = pct_wt_loss:necr_ratio, names_to = 'phenotype', values_to = 'value') %>%
+  select(mouse, mtb_dose, pct_wt_loss:serum_cxcl1) %>% 
+  pivot_longer(cols = pct_wt_loss:serum_cxcl1, names_to = 'phenotype', values_to = 'value') %>%
   mutate(mouse = as.numeric(mouse),
          value = log1p(value)) %>%
   ggplot(aes(mouse, value, color = mtb_dose)) +
@@ -362,8 +333,8 @@ Look at the relationship between phenotype values and the Mtb Initital Dose.
 
 ```{r pheno_by_dose,fig.width=10}
 pheno %>% 
-  select(mouse, mtb_dose, pct_wt_loss:necr_ratio) %>% 
-  pivot_longer(cols = pct_wt_loss:necr_ratio, names_to = 'phenotype', values_to = 'value') %>%
+  select(mouse, mtb_dose, pct_wt_loss:serum_cxcl1) %>% 
+  pivot_longer(cols = pct_wt_loss:serum_cxcl1, names_to = 'phenotype', values_to = 'value') %>%
   mutate(value = log1p(value)) %>%
   ggplot(aes(mtb_dose, value, color = mtb_dose)) +
     geom_point(alpha = 0.3) +
@@ -378,8 +349,8 @@ pheno %>%
 
 ```{r pheno_by_gen,fig.width=10}
 pheno %>% 
-  select(mouse, gen, pct_wt_loss:necr_ratio) %>% 
-  pivot_longer(cols = pct_wt_loss:necr_ratio, names_to = 'phenotype', values_to = 'value') %>%
+  select(mouse, gen, pct_wt_loss:serum_cxcl1) %>% 
+  pivot_longer(cols = pct_wt_loss:serum_cxcl1, names_to = 'phenotype', values_to = 'value') %>%
   mutate(value = log1p(value)) %>%
   ggplot(aes(gen, value)) +
     geom_boxplot() +
@@ -397,8 +368,8 @@ Plot each phenotype versus the euthanasia status.
 
 ```{r pheno_by_euth,fig.width=10,fig.height=10,message=FALSE}
 pheno %>% 
-  select(mouse, euth, pct_wt_loss:necr_ratio) %>% 
-  pivot_longer(cols = pct_wt_loss:necr_ratio, names_to = 'phenotype', values_to = 'value') %>%
+  select(mouse, euth, pct_wt_loss:serum_cxcl1) %>% 
+  pivot_longer(cols = pct_wt_loss:serum_cxcl1, names_to = 'phenotype', values_to = 'value') %>%
   mutate(value = log1p(value)) %>%
   left_join(select(pheno, mouse, euth)) %>%
   ggplot(aes(euth, value)) +
@@ -412,8 +383,8 @@ Plot each phenotype versus the euthansia day.
 
 ```{r pheno_by_euth_day,fig.width=10,fig.height=10,message=FALSE}
 pheno %>% 
-  select(mouse, euth_day, pct_wt_loss:necr_ratio) %>% 
-  pivot_longer(cols = pct_wt_loss:necr_ratio, names_to = 'phenotype', values_to = 'value') %>%
+  select(mouse, euth_day, pct_wt_loss:serum_cxcl1) %>% 
+  pivot_longer(cols = pct_wt_loss:serum_cxcl1, names_to = 'phenotype', values_to = 'value') %>%
   mutate(value = log1p(value)) %>%
   left_join(select(pheno, mouse, euth_day)) %>%
   ggplot(aes(euth_day, value)) +
@@ -430,7 +401,7 @@ There may be some influence of batch or Mtb dose on the phenotypes. Note that ma
 ```{r pheno_anova}
 # I tried to use tidyverse and map() here, but something about the differing number of samples (I think) kept it from working.
 tmp = pheno %>% 
-         select(mouse, gen, expt, cage, aero_run, mtb_dose, pct_wt_loss:necr_ratio) %>%
+         select(mouse, gen, expt, cage, aero_run, mtb_dose, pct_wt_loss:serum_cxcl1) %>%
          mutate(gen      = as.factor(gen),
                 cage     = as.factor(cage),
                 aero_run = as.factor(aero_run)) %>%
@@ -600,8 +571,8 @@ Next, I will plot each pair of phenotypes, colored by generation to see if there
 
 ```{r pheno_bivariate_dist,fig.width=12,fig.height=12,warning=FALSE,message=FALSE}
 pheno %>% 
-  select(mouse, gen, pct_wt_loss:necr_ratio) %>% 
-  pivot_longer(cols = pct_wt_loss:necr_ratio, names_to = 'phenotype', values_to = 'value') %>%
+  select(mouse, gen, pct_wt_loss:serum_cxcl1) %>% 
+  pivot_longer(cols = pct_wt_loss:serum_cxcl1, names_to = 'phenotype', values_to = 'value') %>%
   mutate(value = log1p(value)) %>%
   pivot_wider(names_from = phenotype, values_from = value) %>%
   ggpairs(columns = 3:19, ggplot2::aes(color = gen)) +
@@ -626,7 +597,7 @@ It looks like there is something wrong with Cxcl2 in G22. It has tighter varianc
 Use another view to look at the correlation between phenotypes. This one hides the data, but makes it easier to see which phenotypes are correlated with each other and may warrant further investigations. I can't cluster the phenotypes by similarity because there are NA value in the correlation matrix and most methods blow up. The NA values come from phenotypes that have not been measured in the same mice.
 
 ```{r corrplot_pheno,fig.width=12}
-corrplot.mixed(cor(as.matrix(pheno[,-(1:15)]), use = 'pair'), lower = 'number', upper = 'ellipse')
+corrplot.mixed(cor(as.matrix(pheno[,-(1:17)]), use = 'pair'), lower = 'number', upper = 'ellipse')
 ```
 
 Plot pct_wt_loss, mtb_burden, cxcl1, cxcl2, cxcl5, mmp8, s100a8 & tnf.
@@ -635,7 +606,7 @@ Plot pct_wt_loss, mtb_burden, cxcl1, cxcl2, cxcl5, mmp8, s100a8 & tnf.
 pheno %>%
   select(mouse, gen, pct_wt_loss, mtb_burden, starts_with('lung_cxcl'), lung_mmp8, lung_s100a8, lung_tnf) %>%
   na.omit() %>%
-  pivot_longer(cols = lung_cxcl5:lung_cxcl1, names_to = 'phenotype', values_to = 'value') %>%
+  pivot_longer(cols = pct_wt_loss:lung_tnf, names_to = 'phenotype', values_to = 'value') %>%
   mutate(value = log1p(value)) %>%
   pivot_wider(names_from = phenotype, values_from = value) %>%
   ggpairs(columns = 3:10, ggplot2::aes(color = gen))
@@ -653,9 +624,9 @@ pheno %>%
   ggpairs(columns = 3:10, ggplot2::aes(color = euth))
 ```
 
-Plot Cxcl2 across generations.
+Plot Cxcl2 by dose (confounded wtih generation).
 
-```{r cxcl2_by_gen}
+```{r cxcl2_by_dose}
 pheno %>%
   select(mouse, mtb_dose, lung_cxcl2) %>%
   na.omit() %>%
@@ -679,6 +650,14 @@ pheno %>%
     geom_violin(alpha = 0.3) +
     labs(title = 'Lung Cxcl2')
 ```
+
+Add columns to pheno for mapping.
+
+```{r add_mapping_columns}
+pheno = left_join(pheno, select(orig_pheno, mouse, map_survival, map_lung))
+pheno = select(pheno, mouse:euth, map_survival, map_lung, pct_wt_loss:serum_cxcl1)
+```
+
 
 # Write out Phenotypes.
 

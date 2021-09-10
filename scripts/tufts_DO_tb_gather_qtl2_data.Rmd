@@ -13,10 +13,10 @@ library(tidyverse)
 library(qtl2)
 library(qtl2convert)
 
-base_dir = '/media/dmgatti/hdb/projects/TB'
+base_dir = '/media/dmgatti/data0/Tufts/TB'
 pheno_file  = file.path(base_dir, 'data', 'phenotypes', 'tufts_do_tb_pheno_cleaned.csv')
 #fda_pheno_file = '/media/dmgatti/hdb/projects/USFDA/data/phenotypes/fda_pheno_cleaned.csv'
-probs_file  = file.path(base_dir, 'haplo_reconstr', 'tufts_do_alleleprobs_cleaned.rds')
+probs_file  = file.path(base_dir, 'haplo_reconstr', 'tufts_do_alleleprobs_cleaned_20210601.rds')
 #fda_probs_file = '/media/dmgatti/hdb/projects/USFDA/haplo_reconstr/haps/fda_do_alleleprobs_qc_filtered.rds'
 marker_file = file.path(base_dir, 'haplo_reconstr', 'qtl2', 'pmap.csv')
 output_file = file.path(base_dir, 'data', 'tufts_do_tb_qtl2_input.Rdata')
@@ -76,9 +76,9 @@ Combine the FDA mouse number, dose and survival data for non-vaccinated mice wit
 Separate phenotypes from covariates.
 
 ```{r make_pheno_covar}
-covar = select(pheno, mouse:euth)
+covar = select(pheno, mouse:map_lung)
 rownames(covar) = covar$mouse
-pheno = select(pheno, mouse, pct_wt_loss:necr_ratio)
+pheno = select(pheno, mouse, pct_wt_loss:serum_cxcl1)
 ```
 
 RankZ transform the phenotypes.
@@ -126,7 +126,7 @@ for(chr in unique_chr) {
 Create kinship matrices.
 
 ```{r make_kinship}
-K = calc_kinship(probs, type = 'loco', cores = 4)
+K = calc_kinship(probs, type = 'loco', cores = 8)
 map = map[c(1:19, 'X')]
 ```
 

@@ -1,0 +1,114 @@
+---
+title: "Compare Phenotype Files"
+author: "Daniel M. Gatti, Ph.D."
+date: "9/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readxl)
+library(tidyverse)
+
+base_dir  = '/media/dmgatti/data0/Tufts/TB'
+data_dir  = file.path(base_dir, 'data')
+pheno_dir = file.path(data_dir, 'phenotypes')
+pheno_file1 = file.path(pheno_dir, 'Beamer TB Phenotype data 2021-07-26.xlsx')
+pheno_file2 = file.path(pheno_dir, 'Beamer TB Phenotype data 2021-09-02.xlsx')
+```
+
+When moving from the July 26 data to the September 2 data, we lost QTL peaks for many phenotypes. I want to compare the two files and see if I can find any discrepancies that might explain the peak loss.
+
+Read in the two data files. pheno1 is the older file and pheno2 is the newer file.
+
+```{r read_files}
+pheno1 = readxl::read_xlsx(pheno_file1, sheet = 'Expt & phenotype data', na = 'na')
+pheno2 = readxl::read_xlsx(pheno_file2, sheet = 'Expt & phenotype data', na = 'na')
+```
+
+Compare the dimensions.
+
+```{r compare_dim}
+dim(pheno1)
+dim(pheno2)
+```
+
+The dimensions are the same.
+
+Compare the column names.
+
+```{r compare}
+colnames(pheno1) == colnames(pheno2)
+```
+
+The column names are identical.
+
+Compare the mouse IDs in column 1.
+
+```{r compare_mouse_ids}
+mean(pull(pheno1, `Mouse #`) == pull(pheno2, `Mouse #`))
+```
+
+The '1' means that 100% of the mouse IDs matched. All of the comparisons were TRUE (or 1) and the mean of all 1's is 1.
+
+Count the number of mice in each strain.
+
+```{r count_strain}
+count(pheno1, Strain)
+count(pheno2, Strain)
+```
+
+The two tables look identical.
+
+Count the number of mice in each generation.
+
+```{r count_gen}
+count(pheno1, Generation)
+count(pheno2, Generation)
+```
+
+The generations are identical.
+
+Count the Mtb initial doses.
+
+```{r count_dose}
+count(pheno1, `Mtb initial dose (average)`)
+count(pheno2, `Mtb initial dose (average)`)
+```
+
+These are identical.
+
+Compare euthanasia days.
+
+```{r compare_euth}
+mean(pull(pheno1, `Day euth Post-Infection`) == pull(pheno2, `Day euth Post-Infection`), na.rm = TRUE)
+```
+
+Count NAs in euthanasia day.
+
+```{r compare_euth}
+sum(is.na(pull(pheno1, `Day euth Post-Infection`)))
+sum(is.na(pull(pheno2, `Day euth Post-Infection`)))
+```
+
+Compare each of the numeric phenotype columns.
+
+```{r compare_pheno}
+# Make the columns numeric.
+pheno1 = pheno1 %>% 
+           mutate(across(.cols = `% wt loss cf peak`:`Serum anti-crypto IgG \"ng/mL\"`, .fns = as.numeric))
+pheno2 = pheno2 %>% 
+           mutate(across(.cols = `% wt loss cf peak`:`Serum anti-crypto IgG \"ng/mL\"`, .fns = as.numeric))
+
+for(i in 23:ncol(pheno1)) {
+
+  print(paste(colnames(pheno1)[i], '    ', cor(pheno1[,i], pheno2[,i], use = 'pairwise')))
+  
+} # for(i)
+```
+
+Everything seems identical. This correlation doesn't capture NA values, but at least the values are the same in each file. The previous data didn't change.
+
+
+

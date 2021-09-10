@@ -15,14 +15,12 @@ library(tidyverse)
 library(qtl2)
 library(qtl2convert)
 
-base_dir = "/media/dmgatti/hdb/projects/TB/"
+base_dir = "/media/dmgatti/data0/Tufts/TB/"
 geno_dir = paste0(base_dir, "data/genotypes/")
 hap_dir  = paste0(base_dir, "haplo_reconstr/")
 gigamuga_url = 'https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/gm_uwisc_v1.csv'
-muga_dir = '/media/dmgatti/hda/data/MUGA/'
+muga_dir = '/media/dmgatti/data0/MUGA/'
 ```
-
-NOTE: Some of the genotypes were downloaded from dodb.jax.org. These are from files that are at JAX. We have the Geneseek files for more recently genotyped samples.
 
 Karl Broman at Univ. of Wisconsin [https://kbroman.org/MUGAarrays/new_annotations.html](remapped the GigaMUGA markers) and has produced a new  [https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/mini_uwisc_v1.csv](marker annotation file).
 
@@ -49,11 +47,10 @@ Check the marker name overlap. All of the markers in 'marker' are in 'snps' from
 all(rownames(markers) %in% rownames(snps))
 ```
 
-Load in the Geneseek data that we have.
+Load in the Geneseek data. There are files that start with 'FPGM' that are from UNC and contain data from other investigators. Gillian's samples have 'GB' and/or 'Tufts' in their names. The directories that begin with 'Tufts' are all Gillian's samples.
 
 ```{r gather_geno}
-data_dirs = dir(geno_dir, pattern = '^Tufts_', full.names = TRUE)
-data_dirs = data_dirs[-grep('csv|rds', data_dirs)]
+data_dirs = dir(geno_dir, pattern = '^(Tufts_|FPGM)', full.names = TRUE)
 
 # Variables for genotypes and samples.
 geno    = NULL
@@ -67,87 +64,78 @@ for(d in data_dirs) {
   ds = unlist(strsplit(d, split = "/"))
   ds = ds[length(ds)]
   
+  # Read in data from Neogen file.
   tmp = read.beadstudio(prefix = "ds__", snps = snps, in.path = d)
+  
+  # Subset to keep Gillian's samples in UNC run files.
+  if(startsWith(ds, 'FPGM')) {
+    tmp = subset(tmp, grepl('Tufts', samples(tmp)$iid), by = 'samples')
+    tmp = replace.names(gty = tmp, nn = gsub('^Tufts_GB(2_|_|07\\.2J\\:DO)?', '', samples(tmp)$iid))
+  } # if(startsWith(d, 'FPGM'))
+  
+  # Tufts_MURGIGV01_20151118: Ignore allele calls for 173-184. Beamer e-mail.
+  if(ds == 'Tufts_MURGIGV01_20151118') {
+    
+    tmp = subset(tmp, !samples(tmp)$iid %in% as.character(173:184), by = 'samples')
+    tmp = subset(tmp, !samples(tmp)$iid %in% c('5925011', '5925016', '5925021'), by = 'samples')
+    
+  } # if(ds == 'Tufts_MURGIGV01_20151118')
+  
+  # 20160818_Fixed  12 (173-178 J:DO; 179-184 C57BL/6J). Beamer e-mail.
+  if(ds == '20160818_Fixed') {
+    
+    tmp = subset(tmp, !samples(tmp)$iid %in% as.character(179:184), by = 'samples')
+    
+  } # if(ds == '20160818_Fixed')
+
+  # Save sample IDs
   samples = rbind(samples, cbind(ds, samples(tmp)))
+  
+  # Add batch ID to sample IDs to make unique sample names.
+  tmp = replace.names(gty = tmp, nn = paste(ds, samples(tmp)$iid, sep = ";"))
 
   if(is.null(geno)) {
     geno = tmp
   } else {
     geno = cbind.genotypes(geno, tmp) 
-  }
+  } # else
 
 } # for(d)
+samples$iid = colnames(geno)
 ```
 
-Load in the genotypes file from the JAX [https://dodb.jax.org](DODB).
+Print out the number of samples in each batch.
 
-```{r load_dodb_geno}
-geno2 = readr::read_csv(str_c(geno_dir, 'complete_Beamer-Tufts_Beamer/Beamer-Tufts_Beamer-GigaMUGA-calls.csv'),
-                        col_types = str_c('ccn', str_c(rep('c', 443), collapse = '')))
-# Change allele calls to A, C, G, T, H, N.
-geno2 = geno2 %>%
-          select(-chr, -pos) %>%
-          pivot_longer(cols = -marker, names_to = 'sample', values_to = 'call') %>%
-          mutate(sample = str_c('jax_', sample)) %>%
-          mutate(call = str_replace(call, 'AA', 'A'),
-                 call = str_replace(call, 'CC', 'C'),
-                 call = str_replace(call, 'GG', 'G'),
-                 call = str_replace(call, 'TT', 'T'),
-                 call = str_replace(call, '--', 'N'),
-                 call = str_replace(call, regex('AC|CA|AG|GA|AT|TA|CG|GC|CT|TC|GT|TG'), 'H'))
-stopifnot(distinct(geno2, call)  %>% pull(call) %>% nrow() == 6)
-```
-
-There is one more file that contains genotypes from a UNC run.
-
-```{r gather_extra_geno}
-extra = read.csv(paste0(geno_dir, 'Tufts_GB_sample_genotypes.csv'))
-colnames(extra) = sub('Tufts_GB07.2.J.DO.', '', colnames(extra))
-rownames(extra) = extra$Marker
-colnames(extra)[1:3] = c('marker', 'chr', 'pos')
-
-extra = extra %>%
-          select(-chr, -pos) %>%
-          pivot_longer(cols = -marker, names_to = 'sample', values_to = 'call') %>%
-          mutate(sample = str_c('unc_', sample))
-```
-
-Merge the samples. There will be some duplicates, but I want to see how they turn out. I added 'neo', 'jax' & 'unc' to each of the groups.
-
-```{r}
-g_tmp =  geno %>%
-          as.data.frame() %>%
-          select(-chr, -pos, -cM, -A1, -A2) %>% 
-          pivot_longer(cols = -marker, names_to = 'sample', values_to = 'call') %>%
-          mutate(sample = str_c('neo_', sample))
-
-g = full_join(g_tmp, geno2)
-rm(g_tmp, geno2)
-g = full_join(g, extra)
-rm(extra)
-g = g %>%
-      pivot_wider(names_from = sample, values_from = call)
-gc()
+```{r num_samples_per_batch}
+data.frame(table(samples$ds))
 ```
 
 Check whether we have ~143000 rows.
 
 ```{r}
-dim(g)
+dim(geno)
 ```
 
-Filter genotypes based on no-call rate of 10%.
+Filter genotypes to remove those with a on no-call rate > 10%.
 
 ```{r}
-g = as.data.frame(g)
-rownames(g) = g$marker
-g = as.matrix(g[,-1])
-call_rate = colMeans(g == 'N', na.rm = TRUE)
+geno = as.data.frame(geno)
+rownames(geno) = geno$marker
+geno = as.matrix(geno[,-(1:6)])
+call_rate = colMeans(geno == 'N', na.rm = TRUE)
 outliers = call_rate[call_rate > 0.1]
 outliers = data.frame(sample = names(outliers), call_rate = outliers)
 kable(outliers)
 write.csv(outliers, file = file.path(base_dir, 'results', 'genotype_outliers.csv'))
-g = g[,call_rate <= 0.1]
+geno = geno[,call_rate <= 0.1]
+samples = samples[call_rate <= 0.1,]
+stopifnot(nrow(samples) == ncol(geno))
+```
+
+Make a histogram of the genotypes call rates.
+
+```{r call_rate_histo}
+hist(1.0 - call_rate, breaks = 100, xlim = c(0.9, 1.0))
 ```
 
 Select UNC tier 1 & 2 markers and ones in Karl's marker set.
@@ -155,35 +143,74 @@ Select UNC tier 1 & 2 markers and ones in Karl's marker set.
 ```{r select_markers}
 snps = snps[snps$tier <= 2,]
 markers = markers[markers$marker %in% snps$marker,]
-marker_set = intersect(rownames(g), markers$marker)
+marker_set = intersect(rownames(geno), markers$marker)
 markers = markers[markers$marker %in% marker_set,]
-g = g[markers$marker,]
+geno = geno[markers$marker,]
 ```
 
 Fix some of the sample IDs.
 
 ```{r fix_sample_ids}
-colnames(g) = sub('3_2$',  '23', colnames(g))
-colnames(g) = sub('32_3$', '33', colnames(g))
-colnames(g) = sub('78_2$', '79', colnames(g))
-colnames(g) = sub('Tufts_GB(2)?_', '', colnames(g))
-colnames(g) = make.unique(colnames(g))
-
+colnames(geno) = sub(';3\\.1$',  ';23', colnames(geno))
+colnames(geno) = sub(';32\\.1$', ';33', colnames(geno))
+colnames(geno) = sub(';78\\.1$', ';79', colnames(geno))
+samples$iid = sub(';3\\.1$',  ';23', samples$iid)
+samples$iid = sub(';32\\.1$', ';33', samples$iid)
+samples$iid = sub(';78\\.1$', ';79', samples$iid)
+samples$fid = sub('^3\\.1$',  ';23', samples$fid)
+samples$fid = sub('^32\\.1$', ';33', samples$fid)
+samples$fid = sub('^78\\.1$', ';79', samples$fid)
 ```
 
 Save the genotypes.
 
 ```{r save_geno}
-saveRDS(g, file = paste0(geno_dir, 'genotypes.rds'))
-rm(geno)
+saveRDS(samples, file = file.path(geno_dir, 'genotype_samples.rds'))
+saveRDS(geno,    file = file.path(geno_dir, 'genotypes.rds'))
 gc()
 ```
+
+Look at duplicate samples.
+
+```{r duplicate_samples}
+# Add a column with the mouse ID.
+tmp = sub('\\.[0-9]$', '', samples$iid)
+tmp = strsplit(tmp, ';')
+samples$mouse = sapply(tmp, '[', 2)
+
+# For each sample that was run more than once, compare the genotypes.
+# If they are largely identical, get consensus values.
+# If they are not, flag them.
+samples$dupl = duplicated(samples$mouse)
+samples$dupl = samples$mouse %in% samples$mouse[samples$dupl]
+sample_ct = sort(table(samples$mouse[samples$dupl]))
+
+x = rep(0, length(sample_ct))
+
+for(i in seq_along(sample_ct)) {
+  
+  mouse = names(sample_ct[i])
+  ids = samples$iid[samples$mouse == mouse]
+  
+  curr_geno = geno[,ids]
+  
+  x[i] = mean(curr_geno[,1] == curr_geno[,2])
+  if(x[i] < 0.9) { 
+    print(apply(curr_geno, 2, table))
+  } # if(x[i] < 0.9)
+  
+} # for(i)
+
+```
+
+Only one sample seems to have poor duplication. Mouse 230 is agouti, so we may be able to tell which sample is the correct once from the haplotype probs.
+
 
 Save the sample sex.
 
 ```{r save_sex}
 # All of the samples are female.
-sex = data.frame(id = colnames(g),
+sex = data.frame(id = colnames(geno),
                  sex = 'F')
 
 write.csv(sex, file = paste0(hap_dir, "qtl2/sex.csv"), quote = FALSE, row.names = FALSE)
@@ -192,9 +219,9 @@ write.csv(sex, file = paste0(hap_dir, "qtl2/sex.csv"), quote = FALSE, row.names 
 Gather the founder and sample genotypes and convert them to qtl2 format.
 
 ```{r get_geno_calls}
-load(paste0(muga_dir, "GM_geno.Rdata"))
-load(paste0(muga_dir, "GM_code.Rdata"))
-load(paste0(muga_dir, "GM_sex.Rdata"))
+load(file.path(muga_dir, 'jax_ftp', "GM_geno.Rdata"))
+load(file.path(muga_dir, 'jax_ftp', "GM_code.Rdata"))
+load(file.path(muga_dir, 'jax_ftp', "GM_sex.Rdata"))
 
 # Fix B6 markers.
 b6 = grep('^B6', rownames(GM_geno))
@@ -205,7 +232,7 @@ GM_geno = GM_geno[rownames(markers),]
 stopifnot(rownames(GM_geno) == rownames(markers))
 
 stopifnot(rownames(GM_geno) == rownames(markers))
-stopifnot(rownames(g) == rownames(markers))
+stopifnot(rownames(geno) == rownames(markers))
 ```
 
 
@@ -234,7 +261,7 @@ colnames(fgeno) = substring(colnames(fgeno), 1, 1)
 
 ```{r encode_genotypes}
 # This has the undesired side-effect of sorting the rownames.
-comb_geno = merge(fgeno, g, by = "row.names", sort = FALSE)
+comb_geno = merge(fgeno, geno, by = "row.names", sort = FALSE)
 rownames(comb_geno) = comb_geno[,1]
 comb_geno = as.matrix(comb_geno[,-1])
 comb_geno = comb_geno[rownames(markers),]
@@ -273,6 +300,7 @@ write.csv(tmp, file = paste0(hap_dir, "qtl2/founder_geno.csv"), quote = FALSE, r
 # Write founders.
 tmp = data.frame(marker = rownames(new_geno), new_geno[,-(1:8)])
 colnames(tmp) = sub('^X', '', colnames(tmp))
+colnames(tmp) = sub('\\.', ';', colnames(tmp))
 write.csv(tmp, file = paste0(hap_dir, "qtl2/sample_geno.csv"), quote = FALSE, row.names = FALSE)
 rm(tmp)
 ```
@@ -291,39 +319,38 @@ rm(tmp)
 ```
 
 ```{r make_pheno_covar}
-pheno = readr::read_csv(file.path(base_dir, 'data/phenotypes/tufts_do_tb_pheno_cleaned.csv'))
-pheno = data.frame(pheno)
+pheno = readxl::read_xlsx(path = file.path(base_dir, 'data', 'phenotypes', 'Beamer TB Phenotype data 2021-07-26.xlsx'),
+                          sheet = 'Expt & phenotype data', na = 'na')
+pheno = pheno[,1:5]
+colnames(pheno) = c('mouse', 'coat', 'strain', 'gen', 'expt')
+pheno$mouse = as.character(pheno$mouse)
+pheno$mouse[pheno$mouse == '526.1'] = '526A'
+pheno$mouse[pheno$mouse == '526.2'] = '526B'
+pheno = as.data.frame(pheno)
 rownames(pheno) = pheno$mouse
-pheno$gen = as.numeric(sub("^G", "", pheno$gen))
-colnames(pheno)[1] = 'id'
-pheno$id = as.character(pheno$id)
 
 # Map the genotype samples to the phenotype samples.
-samples = strsplit(colnames(g), '_')
-samples = sapply(samples, function(z) { z[length(z)] })
-samples = sub('\\.[0-9]$', '', samples)
-samples = parse_number(samples)
-samples = data.frame(id = colnames(g), sample = samples)
-samples$sample[samples$id == 'jax_32_3'] = 33
-samples$id[samples$id == 'jax_32_3'] = 'jax_33'
-samples$sample = as.character(samples$sample)
+sample_int = intersect(pheno$mouse, samples$mouse)
 
-covar = data.frame(id     = samples$sample,
-                   sample = samples$id,
+pheno = pheno[sample_int,]
+pheno = pheno[samples$mouse,]
+rownames(pheno) = colnames(geno)
+
+covar = data.frame(id     = rownames(pheno),
+                   sample = rownames(pheno),
+                   gen    = pheno$gen,
                    sex    = 'F')             # All samples are female.
-#m = match(covar$sample, pheno$id)
-#m_wh = which(!is.na(m))
-#covar$gen[m_wh] = pheno$gen[m[m_wh]]
-
-covar = merge(covar, pheno[,c('id', 'gen')], by = 'id')
-colnames(covar) = c('sample', 'id', 'sex', 'gen')
-covar = covar[,c('id', 'sample', 'sex', 'gen')]
+covar$gen = sub('^G', '', covar$gen)
+covar$gen[is.na(covar$gen)] = '1'
+covar$gen = as.numeric(covar$gen)
+rownames(covar) = covar$id
 
 # Create fake phenotypes just for haplotype reconstruction.
 pheno = data.frame(id = covar$id, junk = runif(nrow(covar)))
+rownames(pheno) = pheno$id
 
-write.csv(pheno, file = file.path(hap_dir, "qtl2/pheno.csv"), quote = FALSE, row.names = FALSE)
-write.csv(covar, file = file.path(hap_dir, "qtl2/covar.csv"), quote = TRUE,  row.names = FALSE)
+write.csv(pheno, file = file.path(hap_dir, "qtl2/pheno.csv"), quote = TRUE, row.names = FALSE)
+write.csv(covar, file = file.path(hap_dir, "qtl2/covar.csv"), quote = TRUE, row.names = FALSE)
 ```
 
 ```{r cleanup}
@@ -342,11 +369,11 @@ library(knitr)
 library(qtl2)
 library(qtl2convert)
 
-base_dir = "/media/dmgatti/hdb/projects/TB/"
+base_dir = "/media/dmgatti/data0/Tufts/TB/"
 geno_dir = paste0(base_dir, "data/genotypes/")
 hap_dir  = paste0(base_dir, "haplo_reconstr/")
 gigamuga_url = 'https://raw.githubusercontent.com/kbroman/MUGAarrays/master/UWisc/gm_uwisc_v1.csv'
-muga_dir = '/media/dmgatti/hda/data/MUGA/'
+muga_dir = '/media/dmgatti/data0/MUGA/jax_ftp/'
 ```
 
 Read in the DO cross.
@@ -357,13 +384,13 @@ cross = qtl2::read_cross2(file = paste0(hap_dir, "qtl2/tufts.json"), quiet = FAL
 
 ```{r estimate_haplotype_probs}
 # Run haplotype reconstruction.
-probs = qtl2:::calc_genoprob2(cross = cross, quiet = FALSE)
+probs = qtl2:::calc_genoprob2(cross = cross, quiet = FALSE, cores = 8)
 saveRDS(probs, file = paste0(hap_dir, "tufts_do_genoprobs.rds"))
 
 gc()
 
-# Convert ot allele probs.
-aprobs = genoprob_to_alleleprob(probs = probs, quiet = FALSE)
+# Convert to allele probs.
+aprobs = genoprob_to_alleleprob(probs = probs, quiet = FALSE, cores = 4)
 saveRDS(aprobs, file = paste0(hap_dir, "tufts_do_alleleprobs.rds"))
 
 rm(probs)
